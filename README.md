@@ -2,7 +2,7 @@
 
 Personal tech knowledge archive built with [Quartz](https://quartz.jzhao.xyz/).
 
-Live at: https://whhygee.github.io/archive/
+https://anirudh-y-m.github.io/archive/
 
 ## Local development
 
