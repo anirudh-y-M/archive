@@ -15,3 +15,4 @@ Tools, CLIs, websites, and utilities.
 | [Rectangle](https://rectangleapp.com/)        | Window management for macOS                      |
 | [Maccy](https://maccy.app/)                   | Clipboard manager for macOS                      |
 | [Ghostty](https://ghostty.org/)               | Platform-native UI and GPU acceleration Terminal |
+| [oh-my-zsh](https://ohmyz.sh/)                | OSS zsh configuration                            |
