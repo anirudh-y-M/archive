@@ -1,9 +1,3 @@
-This is a comprehensive deep dive into the world of persistent web connections. We’ve moved from basic "one-and-done" requests to sophisticated, bidirectional streams that can stay open for days.
-
-Here is the full breakdown of our discussion in a structured Q&A format.
-
----
-
 ## 1. The Fundamentals of Streaming
 
 ### How does HTTP Streaming work differently from a "normal" request?
@@ -110,4 +104,3 @@ conn.SetPongHandler(func(string) error {
 
 The most important reason for all this background work is to avoid **Zombies**. A zombie connection is one where the client has disappeared (e.g., they entered an elevator and lost signal), but the server still thinks they are there. Without heartbeats and deadlines, a server could eventually crash because its memory is filled with thousands of "zombie" connections that aren't actually doing anything.
 
-Would you like me to write a **JavaScript client** that connects to these servers and automatically handles reconnections if the heartbeat stops?
