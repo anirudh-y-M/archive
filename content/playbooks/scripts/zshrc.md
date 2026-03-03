@@ -171,14 +171,10 @@ alias kcns='function _change_namespace(){kubectl config set-context --current --
 eval $(thefuck --alias)
 
 # To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
-[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
-export LITELLM_API_KEY=sk-JHdwV84QNge-5YnK_IDZKA
-export ANTHROPIC_BASE_URL=https://litellm.mercari.in
-# export ANTHROPIC_MODEL=vertex_ai/claude-sonnet-4@20250514
-export ANTHROPIC_AUTH_TOKEN=sk-JHdwV84QNge-5YnK_IDZKA
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zs
 
-export EDITOR="cursor --wait"
-export KUBE_EDITOR="cursor --wait"
+export EDITOR="trae --wait"
+export KUBE_EDITOR="trae --wait"
 export GITHUB_TOKEN=$(gh auth token)
 
 # Added by Antigravity
