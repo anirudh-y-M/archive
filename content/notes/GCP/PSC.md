@@ -1,5 +1,5 @@
 ---
-title: 🏗️ Architecture Overview: The PSC "Bridge"
+title: 🏗️ Architecture Overview - The PSC "Bridge"
 ---
 
 Private Service Connect allows you to access a service (like Vertex AI Vector Search) as if it were sitting on your own local network.

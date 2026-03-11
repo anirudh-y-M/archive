@@ -1,5 +1,5 @@
 ---
-title: Understanding Self-Signed Certificates: A Comprehensive Guide
+title: Understanding Self-Signed Certificates
 ---
 
 This document summarizes the cryptographic process of creating and verifying self-signed certificates.

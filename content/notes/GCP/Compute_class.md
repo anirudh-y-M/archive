@@ -1,5 +1,5 @@
 ---
-title: GKE Compute Classes: Detailed Explanation
+title: GKE Compute Classes - Detailed Explanation
 ---
 
 ### What Are Compute Classes?
