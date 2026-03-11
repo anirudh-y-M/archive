@@ -1,3 +1,7 @@
+---
+title: HTTP Streaming
+---
+
 ## 1. The Fundamentals of Streaming
 
 ### How does HTTP Streaming work differently from a "normal" request?

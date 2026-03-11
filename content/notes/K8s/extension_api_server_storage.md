@@ -1,3 +1,7 @@
+---
+title: Extension API Server Overview
+---
+
 ### **Section 1: Core Concepts & Architecture**
 
 #### **Q1: What exactly is an "External API Server" in the context of Kubernetes?**

@@ -1,5 +1,5 @@
-# Go (Golang) Environment Variables
-
+---
+title: Go (Golang) Environment Variables
 ---
 
 ## General

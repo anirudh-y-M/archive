@@ -1,3 +1,6 @@
+---
+title: Issue when installing an external tool Chkk
+---
 
 ### **Part 1: The Core Architecture (The "What")**
 

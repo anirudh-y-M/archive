@@ -1,4 +1,6 @@
-## Cert-manager + webhooks + versioning: Q&A notes
+---
+title: Cert-manager + webhooks + versioning: Q&A notes
+---
 
 ### Q: Where do we put the certificate for a mutating/validating webhook?
 

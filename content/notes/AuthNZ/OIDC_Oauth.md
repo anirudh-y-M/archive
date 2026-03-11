@@ -1,11 +1,5 @@
-Here you go — complete discussion rewritten in **Markdown**, in **Q&A format**, covering everything we discussed without skipping any technical points.
-
 ---
-
-# OAuth vs OIDC vs Workload Identity Federation
-
-*(Complete Q&A Deep Dive)*
-
+title: OAuth vs OIDC vs Workload Identity Federation
 ---
 
 # 1️⃣ What is the core difference between OAuth 2.0 and OIDC?

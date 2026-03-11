@@ -1,6 +1,6 @@
-"HTMLs/networking top to down in GCP.html"
-
-# GKE & Cloudflare Networking: A Deep Dive Architecture Guide
+---
+title: GKE & Cloudflare Networking: A Deep Dive Architecture Guide
+---
 
 **Document Scope:** Detailed analysis of packet flow, load balancing, NAT, Anycast, and security mechanisms for a Google Kubernetes Engine (GKE) cluster fronted by Cloudflare.
 

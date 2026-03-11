@@ -1,4 +1,6 @@
-# Private Service Connect (PSC) - Questions & Answers
+---
+title: Private Service Connect (PSC) - Questions & Answers
+---
 
 ## 1. What is Private Service Connect in GCP?
 **Private Service Connect (PSC)** is a networking capability in Google Cloud that allows Virtual Private Cloud (VPC) networks to access services privately and securely.

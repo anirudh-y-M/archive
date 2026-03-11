@@ -1,4 +1,6 @@
-# GKE Networking: Subnet Allocation Q&A
+---
+title: GKE Networking: Subnet Allocation Q&A
+---
 
 ### **Q1: What happens if I give Cluster 2 a subnet from the same VPC that does not overlap with Cluster 1?**
 

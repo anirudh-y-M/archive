@@ -1,4 +1,6 @@
-# Istio, Envoy, and Traffic Interception: Deep Dive
+---
+title: Istio, Envoy, and Traffic Interception: Deep Dive
+---
 
 ### Q1: What are Istio, Envoy, and istio-proxy, and how do they relate?
 

@@ -1,8 +1,6 @@
-This guide provides a full architectural breakdown of Unix Domain Sockets (UDS) in Go, covering the lifecycle of a connection from creation to teardown.
-
 ---
-
-## The Unix Socket Technical Guide (Go Focus)
+title: The Unix Socket Technical Guide (Go Focus)
+---
 
 ### 1. What is a Unix Domain Socket?
 

@@ -1,4 +1,6 @@
-# OAuth Implementation in SFD - Complete Documentation
+---
+title: OAuth Implementation in SFD - Complete Documentation
+---
 
 ## Table of Contents
 

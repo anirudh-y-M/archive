@@ -1,4 +1,6 @@
-# Q&A Script: SSO, SAML, OAuth 2.0, OIDC, JWT
+---
+title: SSO, SAML, OAuth 2.0, OIDC, JWT
+---
 
 ## Q: What is a JWT token?
 **A:** A **JWT (JSON Web Token)** is a compact, URL-safe string used to carry **claims** (data) that can be **verified** because it is **digitally signed**.
@@ -196,4 +198,3 @@ Best practice:
 - **Enterprise/legacy browser SSO:** SAML (still very common)
 - **Delegated API access (“access my Google Drive”):** OAuth 2.0
 - **Login + API access together:** OIDC (gives ID token + access token)
-

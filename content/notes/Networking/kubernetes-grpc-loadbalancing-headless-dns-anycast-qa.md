@@ -1,7 +1,5 @@
-# Kubernetes + gRPC Load Balancing, Headless Services, DNS Records, and Anycast (Q&A)
-
-> This document captures everything we discussed above, in Q&A form, with all examples, code, and points preserved and expanded in detail.
-
+---
+title: Kubernetes + gRPC Load Balancing, Headless Services, DNS Records, and Anycast (Q&A)
 ---
 
 ## Q1) What is a headless Service and what is its use?

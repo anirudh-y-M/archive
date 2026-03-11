@@ -1,4 +1,6 @@
-# Summary of Questions & Answers (This Thread)
+---
+title: Controller Log Repition Error I Faced with Kubebuilder
+---
 
 - **Q:** _What Service is `nameReference` referring to in the CRD, since our kustomization doesn’t render any Service?_
 

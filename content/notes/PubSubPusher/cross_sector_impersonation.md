@@ -1,4 +1,6 @@
-# DeepWiki Q&A with Code Context for Repository: kouzoh/pubsub-grpc-pusher
+---
+title: PubSub Pusher
+---
 
 ## Q1
 
@@ -296,7 +298,7 @@ module "ns_kouzoh_user_account_jp_dev" {
   service_id   = "kouzoh-user-account-jp"
   namespace    = "kouzoh-user-account-jp-dev"
 
-  destination_client_ids = ["tsZxgqAAVVvyXjgdhvSZVPb3TNltdJMo"]
+  destination_client_ids = ["__"]
 
   providers = {
     google = google

@@ -1,4 +1,6 @@
-# PubSub gRPC Pusher Operator - Architecture & V2 Migration Q&A
+---
+title: Pusher Operator - Architecture & V2 Migration
+---
 
 ### **1. FDS Registry Lifecycle**
 

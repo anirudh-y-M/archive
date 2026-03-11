@@ -1,6 +1,6 @@
-
-
-# Legacy CUE Workflow & module.cue Explained
+---
+title: Legacy CUE Workflow & module.cue Explained
+---
 
 This document explains the structure and logic behind the `module.cue` file in older CUE workflows, specifically focusing on how CUE handles dependencies generated from Go code (`cue get go`).
 

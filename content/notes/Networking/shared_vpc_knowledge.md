@@ -1,3 +1,7 @@
+---
+title: Shared VPC Knowledge
+---
+
 ## Q: What does `terraform/modules/gcp-shared-vpc-service` do?
 
 **A:** The `gcp-shared-vpc-service` module is responsible for **attaching a service project to a Shared VPC host project** and setting up all the necessary permissions. It performs the following key functions:

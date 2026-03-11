@@ -1,9 +1,5 @@
-Here is a **complete, structured Markdown document** of everything we discussed, in **Q&A format**, with examples and no missing points.
-
 ---
-
-# HTTP vs HTTPS Forward Proxy — Complete Q&A Guide
-
+title: HTTP vs HTTPS Forward Proxy — Complete Q&A Guide
 ---
 
 # 1️⃣ What is a Forward Proxy?

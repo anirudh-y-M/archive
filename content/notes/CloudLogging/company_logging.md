@@ -1,4 +1,6 @@
-# GKE Cluster Logging Architecture - Q&A Documentation
+---
+title: GKE Cluster Logging Architecture - Q&A Documentation
+---
 
 ## 1. How is GKE cluster logging configured to send only system logs to Cloud Logging?
 
