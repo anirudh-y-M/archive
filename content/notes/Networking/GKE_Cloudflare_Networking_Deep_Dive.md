@@ -21,32 +21,39 @@ When you deploy a Service and Ingress in GKE with **Container Native Load Balanc
 │           │  Re-encrypt with Origin Cert                                │
 │           │  Direct Peering / IXP                                       │
 │           ▼                                                             │
-│  ┌──────────────────┐   TLS #2 (Google Managed Cert)                   │
-│  │  Google GFE      │   Anycast #2 → enters Google network in Paris    │
-│  │  (Paris PoP)     │                                                   │
-│  └────────┬─────────┘                                                   │
-│           │  Google private backbone (Paris → Iowa)                     │
-│           ▼                                                             │
-│  ┌──────────────────┐                                                   │
-│  │  Google GLB      │   URL Map → NEG lookup → Pod selection           │
-│  │  (us-central1)   │                                                   │
-│  └────────┬─────────┘                                                   │
-│           │  Direct-to-Pod (no DNAT, no kube-proxy)                     │
-│           ▼                                                             │
+│  ┌──────────────────────────────────────────────┐                       │
+│  │  GFE (Paris PoP) — implements your GLB config│                       │
+│  │  ┌────────────────────────────────────────┐  │                       │
+│  │  │  Maglev (L3/L4)                        │  │  Anycast #2 →        │
+│  │  │  Distributes packets to GFE instances  │  │  enters Google       │
+│  │  └──────────────┬─────────────────────────┘  │  network in Paris    │
+│  │  ┌──────────────▼─────────────────────────┐  │                       │
+│  │  │  GFE process (L7)                      │  │                       │
+│  │  │  TLS #2 termination (Google Managed)   │  │                       │
+│  │  │  URL Map evaluation → NEG lookup       │  │                       │
+│  │  │  Health-check-aware Pod selection      │  │                       │
+│  │  └──────────────┬─────────────────────────┘  │                       │
+│  └─────────────────┼────────────────────────────┘                       │
+│                    │  Google private backbone (Paris → Iowa)             │
+│                    │  Direct-to-Pod (no DNAT, no kube-proxy)            │
+│                    ▼                                                     │
 │  ┌──────────────────┐                                                   │
 │  │  Pod (10.4.1.5)  │   Application processes request                  │
+│  │  (us-central1)   │                                                   │
 │  └──────────────────┘                                                   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Note:** GFE (Google Front End) and GLB (Global Load Balancer) are **not** separate hops. GFE is Google's globally distributed reverse-proxy infrastructure fleet; GLB is the customer-facing product (Forwarding Rules, URL Maps, Backend Services) that you configure. When you create a Global External Application Load Balancer, your configuration is executed **on the GFE** at the edge PoP. The GFE terminates TLS *and* evaluates your URL Map / NEG routing in the same process — there is no separate "GLB box" sitting in the backend region.
 
 **Key components:**
 
 1. **Pod** — receives an ephemeral IP (e.g., `10.4.1.5`) from the VPC's secondary range
 2. **Service (NEGs)** — Container Native Load Balancing creates a **Network Endpoint Group** — a dynamic registry of direct Pod IPs, bypassing traditional NodePort/kube-proxy logic
-3. **Ingress (GLB)** — the GKE Ingress Controller provisions a **Google Global HTTPS Load Balancer** with a static global Anycast IP (frontend) linked to the NEG (backend)
+3. **Ingress (GLB on GFE)** — the GKE Ingress Controller provisions a **Global External Application Load Balancer** (GLB) with a static global Anycast IP (frontend) linked to the NEG (backend). The GLB configuration is executed on **Google Front End (GFE)** servers — a globally distributed fleet of reverse proxies at Google's edge PoPs. GFE is the infrastructure; GLB is the product layer you configure on top of it.
 4. **Certificates** — two layers of TLS:
    - **Edge Certificate** — managed by Cloudflare, terminates TLS for the user
-   - **Origin Certificate** — Google Managed Certificate on the GLB, terminates TLS from Cloudflare
+   - **Origin Certificate** — Google Managed Certificate, terminated by GFE at the edge PoP
 5. **DNS** — domain pointed to Cloudflare, which proxies traffic to the Google Static IP
 
 ## The Life of a Packet (5-Leg Flow)
@@ -61,13 +68,13 @@ The user's browser resolves `www.yourdomain.com` to a Cloudflare Anycast IP. Bec
 
 Cloudflare re-encrypts the packet using the Google Origin Certificate. The packet leaves Cloudflare and enters Google's network via **Direct Peering** (PNI) or a local Internet Exchange Point (IXP) — likely still in Paris. Traffic stays local because Google also uses Anycast for the Static IP.
 
-### Leg 3: Google Edge → GLB
+### Leg 3: GFE (Edge PoP) — TLS Termination & L7 Routing
 
-The packet hits a Google Front End (GFE) at the closest Point of Presence. The GLB performs **TLS Termination #2**, then consults the URL Map and NEG availability. If pods are only in `us-central1`, the packet travels over Google's private global fiber backbone from Europe to the US.
+The packet arrives at a **Google Front End (GFE)** at the nearest PoP (Paris). Maglev (Google's L3/L4 software load balancer on commodity servers) distributes the packet to a GFE instance. The GFE performs **TLS Termination #2** using the Google Managed Certificate, then — in the same process — evaluates your GLB configuration: URL Map matching, NEG lookup, health-check-aware Pod selection. There is no separate "GLB hop" — the GFE **is** the GLB at the infrastructure level. If the selected pods are in `us-central1`, the GFE forwards the request over Google's private global fiber backbone from Paris to Iowa.
 
-### Leg 4: GLB → Pod (Container Native Mode)
+### Leg 4: GFE → Pod (Container Native Mode)
 
-The GLB sends the packet directly to the Pod IP (`10.4.1.5`). The packet is encapsulated (Geneve/VXLAN) to traverse the VPC. In Container Native mode, **no DNAT** occurs on the Node — the packet is delivered straight to the Pod's network namespace.
+The GFE sends the packet directly to the Pod IP (`10.4.1.5`). The packet is encapsulated (Geneve/VXLAN) to traverse the VPC. In Container Native mode, **no DNAT** occurs on the Node — the packet is delivered straight to the Pod's network namespace.
 
 ### Leg 5: Return Path
 
@@ -80,8 +87,8 @@ Every point of load balancing and NAT in this architecture:
 | Component | OSI Layer | Type | Function |
 |---|---|---|---|
 | **Cloudflare** | L7 | GSLB / Anycast | Routes users to nearest Cloudflare Edge data center |
-| **Google Edge** | L3/L4 | Anycast / Maglev | Distributes packets from fiber backbone to GFE servers. Maglev is Google's software network LB |
-| **Google GLB** | L7 | HTTP(S) Proxy | Terminates TLS. Routes to Regions/Zones based on latency and capacity |
+| **Maglev** | L3/L4 | Consistent-hashing software LB | Distributes packets at the edge PoP to GFE instances on commodity Linux servers |
+| **GFE (implements GLB)** | L7 | HTTP(S) Reverse Proxy | Terminates TLS, evaluates URL Map, selects backend Pods via NEG. GFE is the infrastructure; GLB is the product config it executes |
 | **VPC Network** | L3 | SDN Routing | Routes packets from GFE to the specific Node |
 | **Kube-Proxy** | L4 | IPTables / IPVS | *Bypassed* in Container Native LB. Only used with traditional NodePort setup |
 | **Cloud NAT** | L3 | SNAT | **Outbound only.** Maps Pod IP to a shared public Static IP when pods call external APIs |
@@ -181,7 +188,7 @@ Without Cloudflare, the architecture changes from a "Double Anycast" proxy setup
 
 ### Q: Trace a full request from a user in Paris to a GKE Pod in the US, identifying every TLS termination and Anycast hop.
 
-**A:** (1) User resolves `www.yourdomain.com` → Cloudflare Anycast IP. Connects to Cloudflare Paris (Anycast #1). (2) Cloudflare terminates TLS #1 (Edge Cert), applies WAF/cache. (3) Cloudflare re-encrypts with Origin Cert and sends to Google Static IP. Due to Anycast #2, traffic enters Google's network in Paris via Direct Peering. (4) GFE in Paris decrypts (TLS #2), GLB checks URL Map/NEG, routes over Google backbone to us-central1. (5) GLB sends directly to Pod IP via Container Native LB (no DNAT). (6) Return path reverses via conntrack: Pod → backbone → GFE Paris → Cloudflare Paris → user.
+**A:** (1) User resolves `www.yourdomain.com` → Cloudflare Anycast IP. Connects to Cloudflare Paris (Anycast #1). (2) Cloudflare terminates TLS #1 (Edge Cert), applies WAF/cache. (3) Cloudflare re-encrypts with Origin Cert and sends to Google Static IP. Due to Anycast #2, traffic enters Google's network in Paris via Direct Peering. (4) Maglev distributes the packet to a GFE instance at the Paris PoP. The GFE terminates TLS #2, then — in the same process — evaluates the GLB config (URL Map, NEG lookup, health-check-aware Pod selection). GFE *is* the GLB at the infrastructure level. It routes the request over Google's backbone to us-central1. (5) GFE sends directly to Pod IP via Container Native LB (no DNAT). (6) Return path reverses via conntrack: Pod → backbone → GFE Paris → Cloudflare Paris → user.
 
 ### Q: What is "Double Anycast" and why does it matter for latency?
 
@@ -189,7 +196,7 @@ Without Cloudflare, the architecture changes from a "Double Anycast" proxy setup
 
 ### Q: Why is Container Native Load Balancing (NEGs) better than the traditional NodePort approach?
 
-**A:** Traditional: GLB → Node IP → kube-proxy iptables → random Pod (double-hop, possible cross-zone). Container Native: GLB → Pod IP directly via NEG (single hop, zone-aware). NEGs give the GLB visibility into individual pod health and location, enabling better load distribution and eliminating the extra hop through kube-proxy.
+**A:** Traditional: GFE → Node IP → kube-proxy iptables → random Pod (double-hop, possible cross-zone). Container Native: GFE → Pod IP directly via NEG (single hop, zone-aware). NEGs give the GFE visibility into individual pod health and location, enabling better load distribution and eliminating the extra hop through kube-proxy.
 
 ### Q: Can an attacker steal traffic by configuring the same Google Static IP on their own server?
 
