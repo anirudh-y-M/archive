@@ -133,3 +133,8 @@ resource "google_dns_record_set" "vertex_psc_dns_record" {
 - **Security:** Traffic never enters the public internet, so it is immune to internet-based DDoS or snooping.
 - **Performance:** Traffic moves across Google’s dedicated fiber backbone, offering the lowest possible latency between your app and the AI model.
 - **Compliance:** Many industries (like Fintech or Healthcare) require that data never leave a private network. This setup satisfies those "Private Link" requirements.
+
+## See also
+
+- [[notes/Networking/private-service-connect|PSC Architecture & VPC Networking]] — consumer-producer model, PSC vs VPC Peering, complete data flow diagrams
+- [[notes/Networking/dns-zones-forwarding|DNS Zones & Forwarding Rules]] — private DNS zones for PSC endpoint hostname resolution

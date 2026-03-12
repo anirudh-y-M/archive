@@ -431,12 +431,7 @@ HTTPS proxy → Encrypted pipe to the proxy
 
 ---
 
-If you'd like, next we can:
+## See also
 
-* Add packet-level TCP + TLS timeline
-* Show Wireshark flow
-* Map this to Go's http.Transport
-* Compare to SSH tunneling
-* Compare to SOCKS5 proxy
-
-Just say the direction you want to go.
+- [[notes/Networking/proxies-and-tls-termination|Proxies & TLS Termination]] — forward vs reverse proxy, L3/L4/L7 layers, Envoy, mitmproxy, Athens Go proxy
+- [[notes/Networking/tls-1.3-handshake|TLS 1.3 Handshake]] — wire-level TLS 1.3 handshake, certificate chain of trust, ECDHE key exchange

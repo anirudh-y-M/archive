@@ -318,7 +318,7 @@ Common causes: missing `config: |` prefix in the ConfigMap data, wrong ConfigMap
 
 **A:** Because the ip-masq-agent has already rewritten the source IP before the packet reaches Cloud NAT. By the time a Pod's packet arrives at the VPC edge, its source IP has been changed from the secondary range (e.g., `10.48.x.x`) to the primary range (e.g., `10.128.x.x`) by the node's iptables rules. Cloud NAT never sees a secondary range IP — it sees a primary range IP. If Cloud NAT is configured to only handle secondary ranges, it ignores the packet. The packet still carries a private IP and gets dropped at the next router because private IPs aren't routable on the public internet.
 
-This is why the recommended configuration is `ALL_IP_RANGES`. It acts as a safety net: if ip-masq-agent is working, Cloud NAT sees primary range IPs and translates them. If the agent crashes or gets misconfigured, Cloud NAT sees secondary range IPs and still translates them. Either way, packets reach the internet.
+This is why the recommended configuration is `ALL_IP_RANGES`. It acts as a safety net: if ip-masq-agent is working, Cloud NAT sees primary range IPs and translates them. If the agent crashes or gets misconfigured, Cloud NAT sees secondary range IPs and still translates them. Either way, packets reach the internet. See [[notes/Networking/cloud-nat-and-vpc-networking|Cloud NAT & VPC Networking]] for full NAT gateway configuration details.
 
 ### Q: What is the difference between `ALL_IP_RANGES`, `PRIMARY_IP_RANGE`, and `LIST_OF_SECONDARY_IP_RANGES` in Cloud NAT's `source_ip_ranges_to_nat`?
 
@@ -329,3 +329,10 @@ This is why the recommended configuration is `ALL_IP_RANGES`. It acts as a safet
 - `LIST_OF_SECONDARY_IP_RANGES` — Only NAT traffic from specific secondary ranges, specified by `secondary_ip_range_names`. Used when you need to NAT pod traffic but not node traffic, or when different secondary ranges need different NAT gateways.
 
 You can combine `PRIMARY_IP_RANGE` and `LIST_OF_SECONDARY_IP_RANGES` to selectively include specific ranges. For GKE, `ALL_IP_RANGES` is almost always correct because it handles both the normal case (ip-masq-agent rewrites to primary) and the failure case (agent down, pods send with secondary IPs).
+
+## See also
+
+- [[notes/GCP/gke-subnet-ip-allocation|GKE Subnet & IP Allocation]] — primary vs secondary ranges, Alias IP mechanics
+- [[notes/Networking/gke-vpc-subnet-scenarios|GKE VPC Subnet Scenarios]] — subnet design patterns (separate, shared, nested)
+- [[notes/Networking/cloud-nat-and-vpc-networking|Cloud NAT & VPC Networking]] — NAT gateway config, port allocation, per-range control
+- [[notes/Networking/shared_vpc_knowledge|Shared VPC Knowledge]] — host/service project attachment

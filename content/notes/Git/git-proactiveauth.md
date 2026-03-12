@@ -33,3 +33,8 @@ git config --global credential.https://github.com.helper \
 ## Git version string bug
 
 The runner Dockerfile sets `ENV GIT_VERSION=v2.53.0`. Git's `GIT-VERSION-GEN` script checks `if test -z "$GIT_VERSION"` — since the env var is already set, it skips version detection (including `v` prefix stripping) and uses `v2.53.0` as-is. This produces `git version v2.53.0` instead of `git version 2.53.0`. Go's version parser regex (`git version\s+(\d+\.\d+(?:\.\d+)?)`) expects digits after `git version` and fails on the `v`. Fix: pass `GIT_VERSION=${GIT_VERSION#v}` to `make`.
+
+## See also
+
+- [[notes/AuthNZ/github-actions-token-anatomy|GitHub Actions Token Anatomy]] — GITHUB_TOKEN vs OIDC JWT, the 401 trap
+- [[notes/Git/user-agent|GitHub API User-Agent]] — Go-http-client UA string and GitHub API best practices

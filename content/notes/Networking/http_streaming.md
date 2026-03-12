@@ -408,3 +408,8 @@ HTTP/2 multiplexes all streams over a **single TCP connection**. Each stream has
 The remaining problem is **TCP-level HOL blocking**. TCP guarantees in-order byte delivery. If a single TCP packet is lost, the kernel buffers all subsequent packets (even those belonging to other HTTP/2 streams) until the lost packet is retransmitted and received. So a packet loss on stream 3 stalls streams 5, 7, and 9 — even though they're independent at the HTTP layer.
 
 HTTP/3 solves this by replacing TCP with QUIC (over UDP). QUIC gives each stream its own independent byte sequence. A lost packet on stream 3 only stalls stream 3 — other streams continue unblocked. This is the fundamental reason HTTP/3 exists: true per-stream independence that HTTP/2 over TCP cannot provide.
+
+## See also
+
+- [[notes/Networking/https-tcp-tls-flow-content-length-vs-chunked-vs-http2|End-to-End HTTPS Flow]] — Content-Length vs chunked vs HTTP/2 body framing in the context of a full HTTPS lifecycle
+- [[notes/Networking/TCP_keepalives|TCP Keepalives]] — how keepalive probes interact with long-lived streaming connections

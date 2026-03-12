@@ -73,5 +73,7 @@ resp, err := client.Do(req)
 
 **See Also:**
 
-* [GitHub API: User-Agent Requirements](https://www.google.com/search?q=https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api%3FapiVersion%3D2022-11-28%23user-agent-required)
-* [Go `net/http` Documentation](https://www.google.com/search?q=%5Bhttps://pkg.go.dev/net/http%5D(https://pkg.go.dev/net/http))
+- [GitHub API: User-Agent Requirements](https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api#user-agent-required)
+- [Go `net/http` Documentation](https://pkg.go.dev/net/http)
+- [[notes/AuthNZ/github-actions-token-anatomy|GitHub Actions Token Anatomy]] — GITHUB_TOKEN vs OIDC JWT, opaque vs structured tokens
+- [[notes/Git/git-proactiveauth|Git proactiveAuth]] — avoiding 401s with credential helpers

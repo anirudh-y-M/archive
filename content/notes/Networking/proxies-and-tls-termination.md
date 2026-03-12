@@ -132,4 +132,6 @@ This reduces unauthenticated requests to GitHub dramatically. The key gap: Athen
 
 ## See also
 
+- [[notes/Networking/http_vs_https_proxy|HTTP vs HTTPS Forward Proxy]] — deep dive on CONNECT tunneling, double TLS, client-proxy vs proxy-server encryption
+- [[notes/Networking/tls-1.3-handshake|TLS 1.3 Handshake]] — how TLS termination actually works at the wire level
 - [[notes/observability-hacks]] — practical techniques (docker binary wrapper, MITM proxy) for debugging CI traffic without full proxy infrastructure

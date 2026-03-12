@@ -190,3 +190,8 @@ The fix: use `GITHUB_TOKEN` (an opaque installation token that GitHub's database
 ### Q: Can you read the contents of a `GITHUB_TOKEN`?
 
 **A:** No. It's an opaque token — a random string prefixed with `ghs_`. There are no embedded claims, no payload to decode. To determine what permissions it has, you must call `https://api.github.com` with it and inspect the response headers (`X-OAuth-Scopes`) or make an introspection-style call. In contrast, an OIDC JWT can be decoded by anyone: `echo $TOKEN | cut -d'.' -f2 | base64 --decode | jq` reveals all claims including the repository, branch, actor, and workflow.
+
+## See also
+
+- [[notes/Git/user-agent|GitHub API User-Agent]] — Go-http-client UA string issues with GitHub API calls
+- [[notes/Git/git-proactiveauth|Git proactiveAuth]] — avoiding 401s with credential helpers and proactiveAuth config

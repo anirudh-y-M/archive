@@ -170,3 +170,10 @@ This matters for teams that need deterministic subnet placement for security or 
 **A:** Because of how Alias IP allocation works. When GKE schedules a node, it pre-allocates a contiguous CIDR block (typically a `/24` = 256 addresses, configurable via `max_pods_per_node`) from the pod secondary range and attaches it to the node's network interface as an alias range. This block is reserved for the lifetime of the node, regardless of actual pod count. The VPC routing table has a single entry for that block pointing to that node — it doesn't track individual pod IPs.
 
 This design enables fast pod scheduling (no need to allocate individual IPs from a central pool) and simple routing (one route per node, not per pod). But it means you can exhaust the pod range long before running out of node IPs. For example, with a `/14` pod range (262,144 addresses) and `/24` per-node allocation, you can support at most 1,024 nodes before the pod range is full — even if most nodes are running only 10 pods each. Reducing `max_pods_per_node` (e.g., to 32, which uses a `/26` = 64 addresses) makes more efficient use of the range at the cost of limiting pod density per node.
+
+## See also
+
+- [[notes/Networking/gke-vpc-subnet-scenarios|GKE VPC Subnet Scenarios]] — subnet overlap, shared subnet, and nested subnet design patterns
+- [[notes/Networking/gke-snat-ip-masquerade|GKE SNAT & IP Masquerading]] — how pod IPs get rewritten for egress traffic
+- [[notes/Networking/cloud-nat-and-vpc-networking|Cloud NAT & VPC Networking]] — NAT gateway configuration, port allocation, per-range NAT control
+- [[notes/Networking/shared_vpc_knowledge|Shared VPC Knowledge]] — host/service project attachment and subnet sharing

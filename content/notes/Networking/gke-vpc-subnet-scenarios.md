@@ -50,3 +50,10 @@ title: GKE Networking - Subnet Allocation Q&A
 | **Separate Subnets** | ✅ Supported | **Best Practice** | High isolation & easy routing. |
 | **Shared Subnet** | ⚠️ Supported | Use for small clusters | Consolidates node management. |
 | **Nested Subnet** | ❌ Forbidden | Do not attempt | N/A |
+
+## See also
+
+- [[notes/GCP/gke-subnet-ip-allocation|GKE Subnet & IP Allocation]] — primary vs secondary ranges, per-node pod CIDR blocks
+- [[notes/Networking/gke-snat-ip-masquerade|GKE SNAT & IP Masquerading]] — ip-masq-agent, iptables rules for egress
+- [[notes/Networking/cloud-nat-and-vpc-networking|Cloud NAT & VPC Networking]] — NAT gateway setup, per-range targeting
+- [[notes/Networking/shared_vpc_knowledge|Shared VPC Knowledge]] — host/service project attachment and subnet sharing

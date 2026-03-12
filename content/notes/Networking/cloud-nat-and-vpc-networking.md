@@ -97,3 +97,10 @@ To route a subset of workloads through a specific egress IP:
 5. **Configure workloads** to tolerate the taint
 
 Key constraint: **Cloud NAT does not allow two gateways on the same router to cover the same IP range.** When carving out a dedicated range, you must explicitly enumerate all other ranges in the existing NAT.
+
+## See also
+
+- [[notes/GCP/gke-subnet-ip-allocation|GKE Subnet & IP Allocation]] — primary vs secondary ranges, per-node pod CIDR blocks
+- [[notes/Networking/gke-vpc-subnet-scenarios|GKE VPC Subnet Scenarios]] — subnet overlap, shared subnet, and nested subnet patterns
+- [[notes/Networking/gke-snat-ip-masquerade|GKE SNAT & IP Masquerading]] — ip-masq-agent, iptables, how pod IPs get rewritten before reaching Cloud NAT
+- [[notes/Networking/shared_vpc_knowledge|Shared VPC Knowledge]] — host/service project attachment, subnet sharing across projects

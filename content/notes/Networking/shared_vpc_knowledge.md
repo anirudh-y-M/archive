@@ -229,3 +229,10 @@ These permissions are granted at the **host project level** because the service 
 - The attachment is a one-time operation per service project
 - Multiple subnets can be created after a single attachment
 - The host project must have Shared VPC enabled before any service projects can attach
+
+## See also
+
+- [[notes/GCP/gke-subnet-ip-allocation|GKE Subnet & IP Allocation]] — primary vs secondary ranges, Alias IP allocation
+- [[notes/Networking/gke-vpc-subnet-scenarios|GKE VPC Subnet Scenarios]] — subnet design patterns for GKE clusters
+- [[notes/Networking/gke-snat-ip-masquerade|GKE SNAT & IP Masquerading]] — egress traffic masquerading in GKE
+- [[notes/Networking/cloud-nat-and-vpc-networking|Cloud NAT & VPC Networking]] — NAT gateway setup for shared VPC environments
