@@ -2,25 +2,74 @@
 @use "./variables.scss" as *;
 
 // ============================================================================
-// CUSTOM UI/UX ENHANCEMENTS
-// Makes the notes site more visually engaging, readable, and enjoyable.
+// CUSTOM UI/UX ENHANCEMENTS -- v2
+// Comprehensive visual polish, animations, and interactive micro-interactions.
+// All animations respect prefers-reduced-motion.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-// 1. SMOOTH PAGE TRANSITIONS & GLOBAL FEEL
+// 0. REDUCED MOTION GUARD
+//    All animations and transitions in this file are wrapped so that users
+//    who prefer reduced motion get instant state changes instead.
+// ---------------------------------------------------------------------------
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 1. SMOOTH PAGE / SPA TRANSITIONS
 // ---------------------------------------------------------------------------
 
 body {
-  // Slightly warmer, softer background transition for theme switching
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-// Fade-in for main content area on page load / SPA navigation
+// Content fades up on every SPA navigation
 .center > article {
-  animation: fadeInUp 0.35s ease-out;
+  animation: contentFadeIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-@keyframes fadeInUp {
+@keyframes contentFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+// Page header (breadcrumbs, title, meta) slides in from left
+.page-header {
+  animation: slideInLeft 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+// Right sidebar fades in with slight delay
+.sidebar.right {
+  animation: sidebarFadeIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+
+@keyframes sidebarFadeIn {
   from {
     opacity: 0;
     transform: translateY(8px);
@@ -32,10 +81,34 @@ body {
 }
 
 // ---------------------------------------------------------------------------
-// 2. TYPOGRAPHY REFINEMENTS
+// 2. SCROLL-TRIGGERED REVEAL ANIMATIONS
+//    Elements get .scroll-reveal from the JS observer; they start hidden
+//    and animate in when .scroll-visible is added.
 // ---------------------------------------------------------------------------
 
-// Better body text rhythm
+.scroll-reveal {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+              transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+
+  &.scroll-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+// Staggered delay for consecutive scroll-reveal siblings
+@for $i from 1 through 8 {
+  .scroll-reveal:nth-child(#{$i}).scroll-visible {
+    transition-delay: #{$i * 0.04}s;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. TYPOGRAPHY REFINEMENTS
+// ---------------------------------------------------------------------------
+
 article {
   p,
   li {
@@ -43,12 +116,10 @@ article {
     letter-spacing: -0.003em;
   }
 
-  // Comfortable reading width for long paragraphs
   > p {
     margin-bottom: 1.15rem;
   }
 
-  // Make lists feel less cramped
   ul,
   ol {
     padding-left: 1.6rem;
@@ -57,7 +128,6 @@ article {
       margin-bottom: 0.3rem;
     }
 
-    // Nested lists
     ul,
     ol {
       margin-top: 0.3rem;
@@ -66,53 +136,134 @@ article {
 }
 
 // ---------------------------------------------------------------------------
-// 3. HEADING ENHANCEMENTS -- visual hierarchy & breathing room
+// 4. HEADING ENHANCEMENTS -- hover effects, animated underlines, accents
 // ---------------------------------------------------------------------------
 
 article {
+  // h2: left accent bar + bottom border + animated underline on hover
   > h2 {
     margin-top: 2.8rem;
-    padding-bottom: 0.4rem;
+    padding-bottom: 0.45rem;
     border-bottom: 1px solid var(--lightgray);
+    position: relative;
+    overflow: hidden;
+    transition: color 0.25s ease;
+
+    // Animated underline that slides in from left on hover
+    &::after {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      width: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--secondary), var(--tertiary));
+      transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+      border-radius: 1px;
+    }
+
+    &:hover::after {
+      width: 100%;
+    }
+
+    &:hover {
+      color: var(--secondary);
+    }
   }
 
-  > h3 {
-    margin-top: 2rem;
-  }
-
-  // Subtle left accent for h2 within article for visual scanning
+  // Left accent bar for h2
   > h2::before {
     content: "";
     display: inline-block;
     width: 4px;
     height: 1em;
-    background: var(--secondary);
+    background: linear-gradient(180deg, var(--secondary), var(--tertiary));
     border-radius: 2px;
     margin-right: 0.6rem;
     vertical-align: middle;
-    opacity: 0.7;
+    transition: height 0.2s ease, opacity 0.2s ease;
+    opacity: 0.8;
+  }
+
+  > h2:hover::before {
+    opacity: 1;
+  }
+
+  // h3: color shift on hover
+  > h3 {
+    margin-top: 2rem;
+    transition: color 0.2s ease, transform 0.2s ease;
+    cursor: default;
+
+    &:hover {
+      color: var(--secondary);
+      transform: translateX(4px);
+    }
+  }
+
+  // h4+: subtle glow on hover
+  > h4,
+  > h5,
+  > h6 {
+    transition: color 0.2s ease;
+
+    &:hover {
+      color: var(--secondary);
+    }
   }
 }
 
-// The page article title
-.page-header .article-title {
+// ---------------------------------------------------------------------------
+// 5. GRADIENT TEXT ON PAGE TITLE
+// ---------------------------------------------------------------------------
+
+.page-title a {
+  background: linear-gradient(135deg, var(--secondary), var(--tertiary));
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  transition: opacity 0.3s ease;
+
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+// Article title: subtle gradient on hover
+.article-title {
+  transition: letter-spacing 0.3s ease;
   letter-spacing: -0.02em;
+
+  &:hover {
+    letter-spacing: 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 4. CODE BLOCKS -- more polished, modern look
+// 6. INTERACTIVE CODE BLOCKS
 // ---------------------------------------------------------------------------
 
 pre {
   border-radius: 8px;
   border: 1px solid var(--lightgray);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  transition: box-shadow 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
   margin: 1.2rem 0;
+  position: relative;
 
   &:hover {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-    border-color: var(--gray);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+    border-color: color-mix(in srgb, var(--secondary) 40%, var(--lightgray));
+    transform: translateY(-1px);
+  }
+
+  // Line hover highlight -- each line lights up on hover
+  > code > [data-line] {
+    transition: background-color 0.15s ease;
+
+    &:hover {
+      background-color: color-mix(in srgb, var(--secondary) 8%, transparent);
+    }
   }
 
   > code {
@@ -121,16 +272,20 @@ pre {
   }
 }
 
-// Inline code -- more distinctive
+// Inline code
 code {
   border-radius: 4px;
   padding: 0.15rem 0.35rem;
   font-size: 0.88em;
   border: 1px solid color-mix(in srgb, var(--lightgray) 70%, transparent);
-  transition: background-color 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--secondary) 30%, transparent);
+  }
 }
 
-// Code title bar (file name label)
+// Code title bar
 figure[data-rehype-pretty-code-figure] > [data-rehype-pretty-code-title] {
   border-radius: 8px 8px 0 0;
   padding: 0.35rem 0.8rem;
@@ -142,6 +297,20 @@ figure[data-rehype-pretty-code-figure] > [data-rehype-pretty-code-title] {
   font-weight: 500;
   color: var(--darkgray);
   letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  // Colored dot before filename (like a terminal tab)
+  &::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--secondary);
+    opacity: 0.6;
+    flex-shrink: 0;
+  }
 
   & + pre {
     border-top-left-radius: 0;
@@ -149,63 +318,86 @@ figure[data-rehype-pretty-code-figure] > [data-rehype-pretty-code-title] {
   }
 }
 
-// Copy button polish
+// Copy button with micro-animation
 .clipboard-button {
   border-radius: 6px;
   padding: 0.35rem;
   margin: 0.4rem;
   border-color: var(--lightgray);
-  transition: all 0.2s ease;
+  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 
   &:hover {
     background-color: var(--lightgray);
     border-color: var(--secondary);
-    transform: scale(1.05);
+    transform: scale(1.1) rotate(2deg);
+  }
+
+  &:active {
+    transform: scale(0.95);
   }
 }
 
 // ---------------------------------------------------------------------------
-// 5. TABLE STYLING -- cleaner, with alternating rows & hover effect
+// 7. TABLE STYLING -- alternating rows, hover glow, entrance animation
 // ---------------------------------------------------------------------------
 
-.table-container > table {
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--lightgray);
-  margin: 1.2rem 0;
-  width: 100%;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+.table-container {
+  overflow-x: auto;
 
-  th {
-    background: color-mix(in srgb, var(--lightgray) 50%, var(--light));
-    font-weight: 600;
-    text-transform: uppercase;
-    font-size: 0.78rem;
-    letter-spacing: 0.05em;
-    padding: 0.6rem 0.8rem;
-    border-bottom: 2px solid var(--lightgray);
-  }
+  > table {
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--lightgray);
+    margin: 1.2rem 0;
+    width: 100%;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+    border-collapse: separate;
+    border-spacing: 0;
 
-  td {
-    padding: 0.5rem 0.8rem;
-    vertical-align: top;
-  }
+    th {
+      background: color-mix(in srgb, var(--lightgray) 50%, var(--light));
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.78rem;
+      letter-spacing: 0.05em;
+      padding: 0.65rem 0.8rem;
+      border-bottom: 2px solid var(--lightgray);
+      position: relative;
 
-  tr {
-    transition: background-color 0.15s ease;
-
-    &:nth-child(even) {
-      background-color: color-mix(in srgb, var(--lightgray) 20%, transparent);
+      // Bottom accent line on header
+      &::after {
+        content: "";
+        position: absolute;
+        bottom: -2px;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: linear-gradient(90deg, var(--secondary), var(--tertiary));
+        opacity: 0.5;
+      }
     }
 
-    &:hover {
-      background-color: color-mix(in srgb, var(--lightgray) 40%, transparent);
+    td {
+      padding: 0.5rem 0.8rem;
+      vertical-align: top;
+    }
+
+    tr {
+      transition: background-color 0.2s ease, transform 0.15s ease;
+
+      &:nth-child(even) {
+        background-color: color-mix(in srgb, var(--lightgray) 18%, transparent);
+      }
+
+      &:hover {
+        background-color: color-mix(in srgb, var(--secondary) 8%, transparent);
+      }
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 6. BLOCKQUOTE & CALLOUT POLISH
+// 8. BLOCKQUOTE & CALLOUT -- entrance animations, hover depth
 // ---------------------------------------------------------------------------
 
 blockquote {
@@ -214,14 +406,25 @@ blockquote {
   background: color-mix(in srgb, var(--lightgray) 25%, transparent);
   padding: 0.8rem 1.2rem;
   margin: 1.2rem 0;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
+  transition: border-color 0.25s ease, background-color 0.25s ease,
+              transform 0.25s ease, box-shadow 0.25s ease;
 
-  // Remove double-bg if it's a callout inside blockquote
+  &:hover {
+    transform: translateX(4px);
+    box-shadow: -4px 0 12px rgba(0, 0, 0, 0.04);
+    border-color: var(--tertiary);
+  }
+
   &:has(.callout) {
     background: transparent;
     border: none;
     padding: 0;
     border-radius: 0;
+
+    &:hover {
+      transform: none;
+      box-shadow: none;
+    }
   }
 
   p {
@@ -229,107 +432,204 @@ blockquote {
   }
 }
 
-// Callout refinements
+// Callouts: hover lift + entrance
 .callout {
   border-radius: 8px;
   margin: 1.2rem 0;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
-  transition: box-shadow 0.2s ease;
+  transition: box-shadow 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
 
   &:hover {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+    transform: translateY(-2px);
   }
 
   .callout-title {
     font-size: 0.92rem;
     letter-spacing: 0.01em;
   }
+
+  // Fold icon rotation is already handled, add a bounce
+  .fold-callout-icon {
+    transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 7. LINKS -- subtle underline animation
+// 9. LINKS -- creative animated underlines
 // ---------------------------------------------------------------------------
 
 a {
-  // Internal wikilinks
+  // Internal wikilinks: sliding background highlight
   &.internal {
     border-radius: 4px;
     padding: 0.05rem 0.2rem;
-    transition: background-color 0.2s ease, color 0.2s ease;
+    position: relative;
+    transition: color 0.25s ease;
+    overflow: hidden;
+    z-index: 0;
 
-    &:hover {
-      background-color: color-mix(in srgb, var(--secondary) 15%, transparent);
+    // Expanding background on hover
+    &::before {
+      content: "";
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 0;
+      background: color-mix(in srgb, var(--secondary) 12%, transparent);
+      transition: height 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+      z-index: -1;
+      border-radius: 4px;
+    }
+
+    &:hover::before {
+      height: 100%;
     }
   }
 
-  // External links
+  // External links: animated underline that slides in from left
   &.external {
-    text-decoration-line: underline;
-    text-decoration-style: dotted;
-    text-underline-offset: 3px;
-    text-decoration-thickness: 1px;
-    text-decoration-color: color-mix(in srgb, var(--secondary) 40%, transparent);
-    transition: text-decoration-color 0.2s ease, color 0.2s ease;
+    position: relative;
+    text-decoration: none !important;
 
-    &:hover {
-      text-decoration-style: solid;
-      text-decoration-color: var(--tertiary);
+    // Static dotted underline
+    &::before {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      width: 100%;
+      height: 1px;
+      background: color-mix(in srgb, var(--secondary) 30%, transparent);
+      border-bottom: 1px dotted color-mix(in srgb, var(--secondary) 40%, transparent);
+    }
+
+    // Animated solid underline on hover
+    &::after {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      width: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--secondary), var(--tertiary));
+      transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+      border-radius: 1px;
+    }
+
+    &:hover::after {
+      width: 100%;
+    }
+
+    // Icon bounce
+    .external-icon {
+      transition: transform 0.2s ease;
+    }
+
+    &:hover .external-icon {
+      transform: translate(1px, -1px);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 8. SIDEBAR POLISH (Explorer, TOC, Graph)
+// 10. SIDEBAR INTERACTIONS -- hover effects, accordion polish
 // ---------------------------------------------------------------------------
 
-// Explorer -- subtle hover states on items
+// Explorer items: slide-in highlight
 .explorer-content ul li > a {
   padding: 0.15rem 0.4rem;
   border-radius: 4px;
-  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+  position: relative;
+  transition: background-color 0.2s ease, color 0.2s ease, opacity 0.2s ease,
+              padding-left 0.2s ease;
 
   &:hover {
-    background-color: color-mix(in srgb, var(--lightgray) 60%, transparent);
+    background-color: color-mix(in srgb, var(--secondary) 10%, transparent);
     opacity: 1 !important;
+    padding-left: 0.65rem;
   }
 
   &.active {
-    background-color: color-mix(in srgb, var(--secondary) 12%, transparent);
+    background-color: color-mix(in srgb, var(--secondary) 14%, transparent);
     font-weight: 600;
+    border-left: 2px solid var(--secondary);
+    padding-left: 0.55rem;
   }
 }
 
-// TOC -- active item highlight
+// Folder icons: bouncy rotation
+.folder-icon {
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.2s ease;
+}
+
+// Folder container hover
+.folder-container {
+  transition: background-color 0.15s ease;
+  border-radius: 4px;
+  padding: 0 0.2rem;
+
+  &:hover {
+    background-color: color-mix(in srgb, var(--lightgray) 30%, transparent);
+  }
+}
+
+// TOC: active item glow + slide highlight
 ul.toc-content.overflow > li > a {
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
   display: inline-block;
-  transition: 0.2s ease opacity, 0.2s ease background-color, 0.2s ease color;
+  position: relative;
+  transition: 0.25s ease opacity, 0.25s ease color, 0.25s ease padding-left;
 
   &.in-view {
-    background-color: color-mix(in srgb, var(--secondary) 10%, transparent);
     opacity: 1;
+    color: var(--secondary);
+    padding-left: 0.6rem;
+    font-weight: 500;
+
+    // Active indicator dot
+    &::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--secondary);
+      animation: tocPulse 2s ease-in-out infinite;
+    }
   }
 
   &:hover {
     opacity: 1 !important;
-    background-color: color-mix(in srgb, var(--lightgray) 50%, transparent);
+    padding-left: 0.6rem;
+    color: var(--tertiary);
   }
 }
 
-// Graph card -- softer border
+@keyframes tocPulse {
+  0%, 100% { opacity: 0.5; transform: translateY(-50%) scale(1); }
+  50% { opacity: 1; transform: translateY(-50%) scale(1.3); }
+}
+
+// Graph card
 .graph > .graph-outer {
   border-radius: 8px;
   border: 1px solid var(--lightgray);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
-  transition: box-shadow 0.2s ease;
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
 
   &:hover {
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+    border-color: color-mix(in srgb, var(--secondary) 30%, var(--lightgray));
   }
 }
 
-// Backlinks section
+// Backlinks
 .backlinks {
   > ul.overflow > li {
     padding: 0.2rem 0;
@@ -337,82 +637,96 @@ ul.toc-content.overflow > li > a {
     > a {
       padding: 0.15rem 0.4rem;
       border-radius: 4px;
-      transition: background-color 0.15s ease;
+      transition: background-color 0.15s ease, padding-left 0.15s ease;
 
       &:hover {
         background-color: color-mix(in srgb, var(--lightgray) 50%, transparent);
+        padding-left: 0.55rem;
       }
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 9. BREADCRUMBS -- lighter, more refined
+// 11. BREADCRUMBS -- slide-in on hover
 // ---------------------------------------------------------------------------
 
 .breadcrumb-container {
   font-size: 0.85rem;
-  opacity: 0.7;
-  transition: opacity 0.2s ease;
+  opacity: 0.65;
+  transition: opacity 0.25s ease;
 
   &:hover {
     opacity: 1;
   }
 }
 
-.breadcrumb-element p {
-  font-weight: 500;
+.breadcrumb-element {
+  transition: transform 0.15s ease;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+
+  p {
+    font-weight: 500;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 10. CONTENT META (date, reading time) -- chip-like style
+// 12. CONTENT META -- chip/pill style
 // ---------------------------------------------------------------------------
 
 .content-meta {
   font-size: 0.84rem;
-  opacity: 0.65;
+  opacity: 0.6;
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 1rem;
+  transition: opacity 0.2s ease;
+
+  &:hover {
+    opacity: 0.85;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 11. HR (section dividers) -- more elegant
+// 13. HR (section dividers) -- animated gradient
 // ---------------------------------------------------------------------------
 
 hr {
   margin: 2.5rem auto;
-  width: 40%;
+  width: 50%;
   height: 2px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--lightgray),
-    var(--gray),
-    var(--lightgray),
-    transparent
-  );
+  background: linear-gradient(90deg, transparent, var(--secondary), var(--tertiary), transparent);
+  background-size: 200% 100%;
+  animation: hrShimmer 4s ease-in-out infinite;
   border: none;
   border-radius: 1px;
 }
 
+@keyframes hrShimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
 // ---------------------------------------------------------------------------
-// 12. IMAGES -- subtle shadow & hover zoom
+// 14. IMAGES -- hover lift + subtle parallax
 // ---------------------------------------------------------------------------
 
 article img {
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+              box-shadow 0.4s ease;
 
   &:hover {
-    transform: scale(1.01);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+    transform: scale(1.015) translateY(-3px);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
   }
 }
 
-// Image captions
 p > img + em {
   display: block;
   text-align: center;
@@ -422,27 +736,31 @@ p > img + em {
 }
 
 // ---------------------------------------------------------------------------
-// 13. SEARCH BUTTON -- more inviting
+// 15. SEARCH -- polished overlay & button
 // ---------------------------------------------------------------------------
 
 .search > .search-button {
   border-radius: 8px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.15s ease;
 
   &:hover {
     border-color: var(--secondary);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
   }
 }
 
-// Search overlay polish
 .search > .search-container > .search-space {
   > input {
     border-radius: 10px;
     padding: 0.7em 1.2em;
     font-size: 1.15em;
     border: 1px solid var(--lightgray);
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    transition: border-color 0.25s ease, box-shadow 0.25s ease;
 
     &:focus {
       border-color: var(--secondary);
@@ -453,27 +771,50 @@ p > img + em {
   > .search-layout {
     border-radius: 10px;
     overflow: hidden;
+
+    .result-card {
+      transition: background 0.2s ease, padding-left 0.2s ease;
+
+      &:hover,
+      &:focus,
+      &.focus {
+        padding-left: 1.25em;
+      }
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 14. FOOTER -- subtle separator
+// 16. FOOTER
 // ---------------------------------------------------------------------------
 
 footer {
   border-top: 1px solid var(--lightgray);
   padding-top: 1.5rem;
   margin-top: 3rem;
+  transition: opacity 0.2s ease;
+
+  &:hover {
+    opacity: 1;
+  }
+
+  ul {
+    a {
+      transition: color 0.2s ease, transform 0.15s ease;
+      display: inline-block;
+
+      &:hover {
+        transform: translateY(-1px);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 15. INTERVIEW PREP SECTION -- visually distinct Q&A cards
+// 17. INTERVIEW PREP Q&A -- card style
 // ---------------------------------------------------------------------------
 
-// Target h2 "Interview Prep" and style subsequent Q&A sections
-// Interview Q headings (### Q:) get card-like treatment
 article {
-  // Style h3 elements that start with "Q:" as question cards
   h3:has(+ p > strong:first-child),
   h3[id^="q"] {
     background: color-mix(in srgb, var(--secondary) 6%, transparent);
@@ -482,25 +823,31 @@ article {
     border-radius: 0 6px 6px 0;
     margin-top: 1.8rem;
     font-size: 1rem;
+    transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+
+    &:hover {
+      background: color-mix(in srgb, var(--secondary) 10%, transparent);
+      border-color: var(--tertiary);
+      transform: translateX(4px);
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 16. DARK MODE ENHANCEMENTS
+// 18. DARK MODE ENHANCEMENTS
 // ---------------------------------------------------------------------------
 
 [saved-theme="dark"] {
-  // Softer code block borders in dark mode
   pre {
     border-color: color-mix(in srgb, var(--lightgray) 60%, transparent);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 
     &:hover {
-      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+      border-color: color-mix(in srgb, var(--secondary) 30%, var(--lightgray));
     }
   }
 
-  // Tables
   .table-container > table {
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 
@@ -509,60 +856,87 @@ article {
     }
   }
 
-  // Blockquotes
   blockquote {
     background: color-mix(in srgb, var(--lightgray) 12%, transparent);
+
+    &:hover {
+      box-shadow: -4px 0 12px rgba(0, 0, 0, 0.15);
+    }
   }
 
-  // Images glow less harshly
   article img {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    // Subtle brightness lift on hover in dark mode
+    &:hover {
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+      filter: brightness(1.05);
+    }
+  }
+
+  .callout {
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+
+    &:hover {
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+    }
+  }
+
+  .graph > .graph-outer {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 
     &:hover {
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     }
   }
 
-  // Callouts
-  .callout {
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-
-    &:hover {
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-    }
+  // Gradient text stays readable in dark
+  .page-title a {
+    background: linear-gradient(135deg, var(--secondary), var(--tertiary));
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
 
-  // Graph
-  .graph > .graph-outer {
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-
-    &:hover {
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
-    }
+  // HR shimmer is more visible in dark
+  hr {
+    opacity: 0.7;
   }
 }
 
 // ---------------------------------------------------------------------------
-// 17. READING PROGRESS INDICATOR -- more visible
+// 19. SCROLL PROGRESS BAR -- gradient with glow
 // ---------------------------------------------------------------------------
 
 .navigation-progress {
   height: 3px;
   background: linear-gradient(90deg, var(--secondary), var(--tertiary));
   border-radius: 0 2px 2px 0;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--secondary) 50%, transparent);
+  z-index: 9999;
 }
 
 // ---------------------------------------------------------------------------
-// 18. SELECTION COLOR -- match theme
+// 20. SELECTION & CURSOR
 // ---------------------------------------------------------------------------
 
 ::selection {
-  background: color-mix(in srgb, var(--tertiary) 40%, transparent);
+  background: color-mix(in srgb, var(--tertiary) 35%, transparent);
   color: var(--dark);
 }
 
+// Text highlight (search results, etc.)
+.text-highlight {
+  transition: background-color 0.3s ease;
+  animation: highlightPulse 1.5s ease-out;
+}
+
+@keyframes highlightPulse {
+  0% { background-color: color-mix(in srgb, var(--tertiary) 60%, transparent); }
+  100% { background-color: var(--textHighlight); }
+}
+
 // ---------------------------------------------------------------------------
-// 19. SCROLL BAR STYLING (webkit browsers)
+// 21. SCROLLBAR STYLING
 // ---------------------------------------------------------------------------
 
 ::-webkit-scrollbar {
@@ -575,34 +949,140 @@ article {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--gray) 40%, transparent);
+  background: color-mix(in srgb, var(--gray) 35%, transparent);
   border-radius: 3px;
+  transition: background 0.2s ease;
 
   &:hover {
     background: color-mix(in srgb, var(--gray) 60%, transparent);
   }
 }
 
-// Firefox scrollbar
 * {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--gray) 40%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--gray) 35%, transparent) transparent;
 }
 
 // ---------------------------------------------------------------------------
-// 20. RESPONSIVE REFINEMENTS
+// 22. POPOVER / TOOLTIP ENHANCEMENTS
+// ---------------------------------------------------------------------------
+
+.popover > .popover-inner {
+  border-radius: 10px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
+  border-color: color-mix(in srgb, var(--lightgray) 80%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+// Override the dropin animation for a smoother feel
+@keyframes dropin {
+  0% {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(4px) scale(0.98);
+  }
+  1% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0) scale(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 23. DARKMODE TOGGLE -- micro-animation
+// ---------------------------------------------------------------------------
+
+.darkmode {
+  transition: transform 0.2s ease;
+
+  &:hover {
+    transform: scale(1.15);
+  }
+
+  &:active {
+    transform: scale(0.9) rotate(15deg);
+  }
+
+  svg {
+    transition: opacity 0.2s ease, transform 0.3s ease;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 24. STAGGERED LIST ITEM ANIMATIONS
+//     Applied by the JS observer to lists that scroll into view.
+// ---------------------------------------------------------------------------
+
+.list-animate > li {
+  opacity: 0;
+  transform: translateX(-12px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.list-animate.scroll-visible > li {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+// Stagger each item
+@for $i from 1 through 20 {
+  .list-animate.scroll-visible > li:nth-child(#{$i}) {
+    transition-delay: #{$i * 0.03}s;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 25. CARD-LIKE SECTION TREATMENT
+//     Sections between h2s can appear as elevated cards.
+// ---------------------------------------------------------------------------
+
+// We use the .section-card class (added by JS) to get a card-like feel
+// between consecutive h2 headings.
+.section-card {
+  background: color-mix(in srgb, var(--lightgray) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lightgray) 50%, transparent);
+  border-radius: 10px;
+  padding: 1.2rem 1.4rem;
+  margin: 1rem 0 1.5rem 0;
+  transition: box-shadow 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
+
+  &:hover {
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--secondary) 20%, var(--lightgray));
+  }
+}
+
+[saved-theme="dark"] .section-card {
+  background: color-mix(in srgb, var(--lightgray) 5%, transparent);
+  border-color: color-mix(in srgb, var(--lightgray) 30%, transparent);
+
+  &:hover {
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    border-color: color-mix(in srgb, var(--secondary) 25%, var(--lightgray));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 26. RESPONSIVE REFINEMENTS
 // ---------------------------------------------------------------------------
 
 @media all and ($mobile) {
   article {
-    // Slightly smaller headings on mobile
     > h2::before {
       width: 3px;
       margin-right: 0.45rem;
     }
+
+    > h3:hover {
+      transform: translateX(2px);
+    }
   }
 
-  // Tables scroll hint
   .table-container {
     position: relative;
 
@@ -618,10 +1098,17 @@ article {
       opacity: 0.8;
     }
   }
+
+  // Disable hover-dependent transforms on mobile
+  blockquote:hover,
+  .callout:hover,
+  pre:hover {
+    transform: none;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 21. FOOTNOTES -- cleaner section
+// 27. FOOTNOTES
 // ---------------------------------------------------------------------------
 
 .footnotes {
@@ -633,7 +1120,30 @@ article {
 }
 
 // ---------------------------------------------------------------------------
-// 22. PRINT STYLES (bonus)
+// 28. CHECKBOX ANIMATION
+// ---------------------------------------------------------------------------
+
+input[type="checkbox"] {
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+
+  &:hover {
+    border-color: var(--secondary);
+    transform: translateY(2px) scale(1.1);
+  }
+
+  &:checked {
+    animation: checkBounce 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+}
+
+@keyframes checkBounce {
+  0% { transform: translateY(2px) scale(0.8); }
+  50% { transform: translateY(2px) scale(1.15); }
+  100% { transform: translateY(2px) scale(1); }
+}
+
+// ---------------------------------------------------------------------------
+// 29. PRINT STYLES
 // ---------------------------------------------------------------------------
 
 @media print {
@@ -647,6 +1157,14 @@ article {
   .breadcrumb-container,
   footer {
     display: none !important;
+  }
+
+  // Remove all animations for print
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
   }
 
   article {
