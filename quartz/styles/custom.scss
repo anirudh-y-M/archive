@@ -1,3 +1,660 @@
 @use "./base.scss";
+@use "./variables.scss" as *;
 
-// put your custom CSS here!
+// ============================================================================
+// CUSTOM UI/UX ENHANCEMENTS
+// Makes the notes site more visually engaging, readable, and enjoyable.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// 1. SMOOTH PAGE TRANSITIONS & GLOBAL FEEL
+// ---------------------------------------------------------------------------
+
+body {
+  // Slightly warmer, softer background transition for theme switching
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+// Fade-in for main content area on page load / SPA navigation
+.center > article {
+  animation: fadeInUp 0.35s ease-out;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. TYPOGRAPHY REFINEMENTS
+// ---------------------------------------------------------------------------
+
+// Better body text rhythm
+article {
+  p,
+  li {
+    line-height: 1.75;
+    letter-spacing: -0.003em;
+  }
+
+  // Comfortable reading width for long paragraphs
+  > p {
+    margin-bottom: 1.15rem;
+  }
+
+  // Make lists feel less cramped
+  ul,
+  ol {
+    padding-left: 1.6rem;
+
+    li {
+      margin-bottom: 0.3rem;
+    }
+
+    // Nested lists
+    ul,
+    ol {
+      margin-top: 0.3rem;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. HEADING ENHANCEMENTS -- visual hierarchy & breathing room
+// ---------------------------------------------------------------------------
+
+article {
+  > h2 {
+    margin-top: 2.8rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--lightgray);
+  }
+
+  > h3 {
+    margin-top: 2rem;
+  }
+
+  // Subtle left accent for h2 within article for visual scanning
+  > h2::before {
+    content: "";
+    display: inline-block;
+    width: 4px;
+    height: 1em;
+    background: var(--secondary);
+    border-radius: 2px;
+    margin-right: 0.6rem;
+    vertical-align: middle;
+    opacity: 0.7;
+  }
+}
+
+// The page article title
+.page-header .article-title {
+  letter-spacing: -0.02em;
+}
+
+// ---------------------------------------------------------------------------
+// 4. CODE BLOCKS -- more polished, modern look
+// ---------------------------------------------------------------------------
+
+pre {
+  border-radius: 8px;
+  border: 1px solid var(--lightgray);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  margin: 1.2rem 0;
+
+  &:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    border-color: var(--gray);
+  }
+
+  > code {
+    font-size: 0.84rem;
+    line-height: 1.65;
+  }
+}
+
+// Inline code -- more distinctive
+code {
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.88em;
+  border: 1px solid color-mix(in srgb, var(--lightgray) 70%, transparent);
+  transition: background-color 0.15s ease;
+}
+
+// Code title bar (file name label)
+figure[data-rehype-pretty-code-figure] > [data-rehype-pretty-code-title] {
+  border-radius: 8px 8px 0 0;
+  padding: 0.35rem 0.8rem;
+  background: var(--lightgray);
+  border: 1px solid var(--lightgray);
+  border-bottom: none;
+  margin-bottom: -1px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--darkgray);
+  letter-spacing: 0.01em;
+
+  & + pre {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+}
+
+// Copy button polish
+.clipboard-button {
+  border-radius: 6px;
+  padding: 0.35rem;
+  margin: 0.4rem;
+  border-color: var(--lightgray);
+  transition: all 0.2s ease;
+
+  &:hover {
+    background-color: var(--lightgray);
+    border-color: var(--secondary);
+    transform: scale(1.05);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. TABLE STYLING -- cleaner, with alternating rows & hover effect
+// ---------------------------------------------------------------------------
+
+.table-container > table {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--lightgray);
+  margin: 1.2rem 0;
+  width: 100%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+
+  th {
+    background: color-mix(in srgb, var(--lightgray) 50%, var(--light));
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.78rem;
+    letter-spacing: 0.05em;
+    padding: 0.6rem 0.8rem;
+    border-bottom: 2px solid var(--lightgray);
+  }
+
+  td {
+    padding: 0.5rem 0.8rem;
+    vertical-align: top;
+  }
+
+  tr {
+    transition: background-color 0.15s ease;
+
+    &:nth-child(even) {
+      background-color: color-mix(in srgb, var(--lightgray) 20%, transparent);
+    }
+
+    &:hover {
+      background-color: color-mix(in srgb, var(--lightgray) 40%, transparent);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. BLOCKQUOTE & CALLOUT POLISH
+// ---------------------------------------------------------------------------
+
+blockquote {
+  border-left: 4px solid var(--secondary);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--lightgray) 25%, transparent);
+  padding: 0.8rem 1.2rem;
+  margin: 1.2rem 0;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+
+  // Remove double-bg if it's a callout inside blockquote
+  &:has(.callout) {
+    background: transparent;
+    border: none;
+    padding: 0;
+    border-radius: 0;
+  }
+
+  p {
+    margin: 0.3rem 0;
+  }
+}
+
+// Callout refinements
+.callout {
+  border-radius: 8px;
+  margin: 1.2rem 0;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  transition: box-shadow 0.2s ease;
+
+  &:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07);
+  }
+
+  .callout-title {
+    font-size: 0.92rem;
+    letter-spacing: 0.01em;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. LINKS -- subtle underline animation
+// ---------------------------------------------------------------------------
+
+a {
+  // Internal wikilinks
+  &.internal {
+    border-radius: 4px;
+    padding: 0.05rem 0.2rem;
+    transition: background-color 0.2s ease, color 0.2s ease;
+
+    &:hover {
+      background-color: color-mix(in srgb, var(--secondary) 15%, transparent);
+    }
+  }
+
+  // External links
+  &.external {
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
+    text-decoration-color: color-mix(in srgb, var(--secondary) 40%, transparent);
+    transition: text-decoration-color 0.2s ease, color 0.2s ease;
+
+    &:hover {
+      text-decoration-style: solid;
+      text-decoration-color: var(--tertiary);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. SIDEBAR POLISH (Explorer, TOC, Graph)
+// ---------------------------------------------------------------------------
+
+// Explorer -- subtle hover states on items
+.explorer-content ul li > a {
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+
+  &:hover {
+    background-color: color-mix(in srgb, var(--lightgray) 60%, transparent);
+    opacity: 1 !important;
+  }
+
+  &.active {
+    background-color: color-mix(in srgb, var(--secondary) 12%, transparent);
+    font-weight: 600;
+  }
+}
+
+// TOC -- active item highlight
+ul.toc-content.overflow > li > a {
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  display: inline-block;
+  transition: 0.2s ease opacity, 0.2s ease background-color, 0.2s ease color;
+
+  &.in-view {
+    background-color: color-mix(in srgb, var(--secondary) 10%, transparent);
+    opacity: 1;
+  }
+
+  &:hover {
+    opacity: 1 !important;
+    background-color: color-mix(in srgb, var(--lightgray) 50%, transparent);
+  }
+}
+
+// Graph card -- softer border
+.graph > .graph-outer {
+  border-radius: 8px;
+  border: 1px solid var(--lightgray);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  transition: box-shadow 0.2s ease;
+
+  &:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+  }
+}
+
+// Backlinks section
+.backlinks {
+  > ul.overflow > li {
+    padding: 0.2rem 0;
+
+    > a {
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      transition: background-color 0.15s ease;
+
+      &:hover {
+        background-color: color-mix(in srgb, var(--lightgray) 50%, transparent);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9. BREADCRUMBS -- lighter, more refined
+// ---------------------------------------------------------------------------
+
+.breadcrumb-container {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+
+  &:hover {
+    opacity: 1;
+  }
+}
+
+.breadcrumb-element p {
+  font-weight: 500;
+}
+
+// ---------------------------------------------------------------------------
+// 10. CONTENT META (date, reading time) -- chip-like style
+// ---------------------------------------------------------------------------
+
+.content-meta {
+  font-size: 0.84rem;
+  opacity: 0.65;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+// ---------------------------------------------------------------------------
+// 11. HR (section dividers) -- more elegant
+// ---------------------------------------------------------------------------
+
+hr {
+  margin: 2.5rem auto;
+  width: 40%;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--lightgray),
+    var(--gray),
+    var(--lightgray),
+    transparent
+  );
+  border: none;
+  border-radius: 1px;
+}
+
+// ---------------------------------------------------------------------------
+// 12. IMAGES -- subtle shadow & hover zoom
+// ---------------------------------------------------------------------------
+
+article img {
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+
+  &:hover {
+    transform: scale(1.01);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  }
+}
+
+// Image captions
+p > img + em {
+  display: block;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--gray);
+  margin-top: -0.5rem;
+}
+
+// ---------------------------------------------------------------------------
+// 13. SEARCH BUTTON -- more inviting
+// ---------------------------------------------------------------------------
+
+.search > .search-button {
+  border-radius: 8px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+
+  &:hover {
+    border-color: var(--secondary);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  }
+}
+
+// Search overlay polish
+.search > .search-container > .search-space {
+  > input {
+    border-radius: 10px;
+    padding: 0.7em 1.2em;
+    font-size: 1.15em;
+    border: 1px solid var(--lightgray);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+
+    &:focus {
+      border-color: var(--secondary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--secondary) 15%, transparent);
+    }
+  }
+
+  > .search-layout {
+    border-radius: 10px;
+    overflow: hidden;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 14. FOOTER -- subtle separator
+// ---------------------------------------------------------------------------
+
+footer {
+  border-top: 1px solid var(--lightgray);
+  padding-top: 1.5rem;
+  margin-top: 3rem;
+}
+
+// ---------------------------------------------------------------------------
+// 15. INTERVIEW PREP SECTION -- visually distinct Q&A cards
+// ---------------------------------------------------------------------------
+
+// Target h2 "Interview Prep" and style subsequent Q&A sections
+// Interview Q headings (### Q:) get card-like treatment
+article {
+  // Style h3 elements that start with "Q:" as question cards
+  h3:has(+ p > strong:first-child),
+  h3[id^="q"] {
+    background: color-mix(in srgb, var(--secondary) 6%, transparent);
+    border-left: 3px solid var(--secondary);
+    padding: 0.5rem 0.8rem;
+    border-radius: 0 6px 6px 0;
+    margin-top: 1.8rem;
+    font-size: 1rem;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 16. DARK MODE ENHANCEMENTS
+// ---------------------------------------------------------------------------
+
+[saved-theme="dark"] {
+  // Softer code block borders in dark mode
+  pre {
+    border-color: color-mix(in srgb, var(--lightgray) 60%, transparent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+
+    &:hover {
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+    }
+  }
+
+  // Tables
+  .table-container > table {
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+
+    th {
+      background: color-mix(in srgb, var(--lightgray) 30%, var(--light));
+    }
+  }
+
+  // Blockquotes
+  blockquote {
+    background: color-mix(in srgb, var(--lightgray) 12%, transparent);
+  }
+
+  // Images glow less harshly
+  article img {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+
+    &:hover {
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    }
+  }
+
+  // Callouts
+  .callout {
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+
+    &:hover {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    }
+  }
+
+  // Graph
+  .graph > .graph-outer {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+
+    &:hover {
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 17. READING PROGRESS INDICATOR -- more visible
+// ---------------------------------------------------------------------------
+
+.navigation-progress {
+  height: 3px;
+  background: linear-gradient(90deg, var(--secondary), var(--tertiary));
+  border-radius: 0 2px 2px 0;
+}
+
+// ---------------------------------------------------------------------------
+// 18. SELECTION COLOR -- match theme
+// ---------------------------------------------------------------------------
+
+::selection {
+  background: color-mix(in srgb, var(--tertiary) 40%, transparent);
+  color: var(--dark);
+}
+
+// ---------------------------------------------------------------------------
+// 19. SCROLL BAR STYLING (webkit browsers)
+// ---------------------------------------------------------------------------
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--gray) 40%, transparent);
+  border-radius: 3px;
+
+  &:hover {
+    background: color-mix(in srgb, var(--gray) 60%, transparent);
+  }
+}
+
+// Firefox scrollbar
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--gray) 40%, transparent) transparent;
+}
+
+// ---------------------------------------------------------------------------
+// 20. RESPONSIVE REFINEMENTS
+// ---------------------------------------------------------------------------
+
+@media all and ($mobile) {
+  article {
+    // Slightly smaller headings on mobile
+    > h2::before {
+      width: 3px;
+      margin-right: 0.45rem;
+    }
+  }
+
+  // Tables scroll hint
+  .table-container {
+    position: relative;
+
+    &::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 20px;
+      background: linear-gradient(to left, var(--light), transparent);
+      pointer-events: none;
+      opacity: 0.8;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 21. FOOTNOTES -- cleaner section
+// ---------------------------------------------------------------------------
+
+.footnotes {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 2px solid var(--lightgray);
+  font-size: 0.9rem;
+  opacity: 0.85;
+}
+
+// ---------------------------------------------------------------------------
+// 22. PRINT STYLES (bonus)
+// ---------------------------------------------------------------------------
+
+@media print {
+  .sidebar,
+  .graph,
+  .backlinks,
+  .search,
+  .darkmode,
+  .toc,
+  .navigation-progress,
+  .breadcrumb-container,
+  footer {
+    display: none !important;
+  }
+
+  article {
+    max-width: 100% !important;
+
+    pre {
+      box-shadow: none;
+      border: 1px solid #ccc;
+    }
+  }
+}
