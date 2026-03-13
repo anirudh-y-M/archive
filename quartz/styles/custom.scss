@@ -81,31 +81,6 @@ body {
 }
 
 // ---------------------------------------------------------------------------
-// 2. SCROLL-TRIGGERED REVEAL ANIMATIONS
-//    Elements get .scroll-reveal from the JS observer; they start hidden
-//    and animate in when .scroll-visible is added.
-// ---------------------------------------------------------------------------
-
-.scroll-reveal {
-  opacity: 0;
-  transform: translateY(20px);
-  transition: opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1),
-              transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
-
-  &.scroll-visible {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-// Staggered delay for consecutive scroll-reveal siblings
-@for $i from 1 through 8 {
-  .scroll-reveal:nth-child(#{$i}).scroll-visible {
-    transition-delay: #{$i * 0.04}s;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // 3. TYPOGRAPHY REFINEMENTS
 // ---------------------------------------------------------------------------
 
@@ -536,6 +511,14 @@ a {
 // ---------------------------------------------------------------------------
 // 10. SIDEBAR INTERACTIONS -- hover effects, accordion polish
 // ---------------------------------------------------------------------------
+
+// Explorer leaf items: add bullet before individual notes (not folders)
+.explorer-content ul li:not(:has(> .folder-container)) > a::before {
+  content: "•";
+  margin-right: 0.4rem;
+  color: var(--gray);
+  font-size: 0.85em;
+}
 
 // Explorer items: slide-in highlight
 .explorer-content ul li > a {
@@ -1012,60 +995,7 @@ article {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 24. STAGGERED LIST ITEM ANIMATIONS
-//     Applied by the JS observer to lists that scroll into view.
-// ---------------------------------------------------------------------------
 
-.list-animate > li {
-  opacity: 0;
-  transform: translateX(-12px);
-  transition: opacity 0.35s ease, transform 0.35s ease;
-}
-
-.list-animate.scroll-visible > li {
-  opacity: 1;
-  transform: translateX(0);
-}
-
-// Stagger each item
-@for $i from 1 through 20 {
-  .list-animate.scroll-visible > li:nth-child(#{$i}) {
-    transition-delay: #{$i * 0.03}s;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 25. CARD-LIKE SECTION TREATMENT
-//     Sections between h2s can appear as elevated cards.
-// ---------------------------------------------------------------------------
-
-// We use the .section-card class (added by JS) to get a card-like feel
-// between consecutive h2 headings.
-.section-card {
-  background: color-mix(in srgb, var(--lightgray) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--lightgray) 50%, transparent);
-  border-radius: 10px;
-  padding: 1.2rem 1.4rem;
-  margin: 1rem 0 1.5rem 0;
-  transition: box-shadow 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
-
-  &:hover {
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
-    transform: translateY(-2px);
-    border-color: color-mix(in srgb, var(--secondary) 20%, var(--lightgray));
-  }
-}
-
-[saved-theme="dark"] .section-card {
-  background: color-mix(in srgb, var(--lightgray) 5%, transparent);
-  border-color: color-mix(in srgb, var(--lightgray) 30%, transparent);
-
-  &:hover {
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-    border-color: color-mix(in srgb, var(--secondary) 25%, var(--lightgray));
-  }
-}
 
 // ---------------------------------------------------------------------------
 // 26. RESPONSIVE REFINEMENTS
