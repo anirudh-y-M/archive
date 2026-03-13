@@ -1,6 +1,6 @@
 ---
-
-## title: "Istio Service Mesh: Architecture, Traffic Interception, xDS, mTLS, and Ambient Mode"
+title: "Istio Service Mesh: Architecture, Traffic Interception, xDS, mTLS, and Ambient Mode"
+---
 
 ## Overview
 
