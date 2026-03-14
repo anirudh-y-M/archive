@@ -8,6 +8,82 @@
 // ============================================================================
 
 // ---------------------------------------------------------------------------
+// COLOR THEMES
+// Each [data-theme] overrides --secondary, --tertiary, --highlight, --textHighlight.
+// "ocean" is the default (matches quartz.config.ts colors) so it has no overrides.
+// ---------------------------------------------------------------------------
+
+// -- Rose / Pink --
+:root[data-theme="rose"] {
+  --secondary: #c2527a;
+  --tertiary: #e88fa5;
+  --highlight: rgba(194, 82, 122, 0.12);
+  --textHighlight: #fecdd388;
+}
+:root[saved-theme="dark"][data-theme="rose"] {
+  --secondary: #f0829e;
+  --tertiary: #f4a7bc;
+  --highlight: rgba(240, 130, 158, 0.12);
+  --textHighlight: #fda4af88;
+}
+
+// -- Emerald / Green --
+:root[data-theme="emerald"] {
+  --secondary: #2d8a5e;
+  --tertiary: #5cb88a;
+  --highlight: rgba(45, 138, 94, 0.12);
+  --textHighlight: #a7f3d088;
+}
+:root[saved-theme="dark"][data-theme="emerald"] {
+  --secondary: #5ecc96;
+  --tertiary: #86efac;
+  --highlight: rgba(94, 204, 150, 0.12);
+  --textHighlight: #6ee7b788;
+}
+
+// -- Amber / Warm --
+:root[data-theme="amber"] {
+  --secondary: #b47216;
+  --tertiary: #d4993c;
+  --highlight: rgba(180, 114, 22, 0.12);
+  --textHighlight: #fde68a88;
+}
+:root[saved-theme="dark"][data-theme="amber"] {
+  --secondary: #f0b64e;
+  --tertiary: #fbbf24;
+  --highlight: rgba(240, 182, 78, 0.12);
+  --textHighlight: #fcd34d88;
+}
+
+// -- Violet / Purple --
+:root[data-theme="violet"] {
+  --secondary: #7c3aed;
+  --tertiary: #a78bfa;
+  --highlight: rgba(124, 58, 237, 0.12);
+  --textHighlight: #ddd6fe88;
+}
+:root[saved-theme="dark"][data-theme="violet"] {
+  --secondary: #a78bfa;
+  --tertiary: #c4b5fd;
+  --highlight: rgba(167, 139, 250, 0.12);
+  --textHighlight: #c4b5fd88;
+}
+
+// -- Mono / Grayscale --
+:root[data-theme="mono"] {
+  --secondary: #525252;
+  --tertiary: #78716c;
+  --highlight: rgba(82, 82, 82, 0.1);
+  --textHighlight: #d4d4d488;
+}
+:root[saved-theme="dark"][data-theme="mono"] {
+  --secondary: #a8a29e;
+  --tertiary: #d6d3d1;
+  --highlight: rgba(168, 162, 158, 0.1);
+  --textHighlight: #a8a29e88;
+}
+
+// ---------------------------------------------------------------------------
 // 0. REDUCED MOTION GUARD
 //    All animations and transitions in this file are wrapped so that users
 //    who prefer reduced motion get instant state changes instead.
@@ -25,63 +101,18 @@
 }
 
 // ---------------------------------------------------------------------------
-// 1. SMOOTH PAGE / SPA TRANSITIONS
+// 1. SMOOTH THEME TRANSITIONS (no content fade-in — user prefers static)
 // ---------------------------------------------------------------------------
 
 body {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-// Content fades up on every SPA navigation
-.center > article {
-  animation: contentFadeIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes contentFadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-// Page header (breadcrumbs, title, meta) slides in from left
-.page-header {
-  animation: slideInLeft 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes slideInLeft {
-  from {
-    opacity: 0;
-    transform: translateX(-16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-// Right sidebar fades in with slight delay
-.sidebar.right {
-  animation: sidebarFadeIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
-}
-
-@keyframes sidebarFadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
+// Removed: contentFadeIn, slideInLeft, sidebarFadeIn animations.
+// User preference: content should appear instantly, not animate in.
 
 // ---------------------------------------------------------------------------
-// 3. TYPOGRAPHY REFINEMENTS
+// 2. TYPOGRAPHY REFINEMENTS
 // ---------------------------------------------------------------------------
 
 article {
