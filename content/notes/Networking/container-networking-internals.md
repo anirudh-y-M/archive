@@ -1055,6 +1055,412 @@ A final important distinction that trips people up:
 
 ---
 
+## eth0 Inside a Container -- IP Assignment and Routing
+
+The `eth0` interface inside a container has its **own private IP** (e.g., `172.17.0.2`). It does NOT share the host's IP. It does NOT know about the host. From the container's perspective, `eth0` is its only connection to the outside world, and the routing table dictates where traffic goes.
+
+### Container's Routing Table
+
+```bash
+# Inside the container:
+$ ip route
+default via 172.17.0.1 dev eth0
+172.17.0.0/16 dev eth0 scope link
+```
+
+The default route says: "for any destination not on `172.17.0.0/16`, send the packet to gateway `172.17.0.1` via `eth0`." The container's kernel obeys this blindly -- it has no knowledge of veth pairs, bridges, or host routing tables.
+
+### eth0 Is Blind to the Host
+
+The container's `eth0` is one end of a veth pair. It has no awareness that the other end is plugged into a bridge in the host namespace. As far as the container kernel is concerned, `eth0` is a regular Ethernet interface. The veth pair acts as an **invisible kernel tunnel**: any packet shoved into the container's `eth0` automatically pops out at the host-side `vethXXXXXX`. This is not a configurable behavior -- it is the fundamental property of veth pairs.
+
+```
+┌─ Container Namespace ──────────────────────────────────┐
+│                                                          │
+│  eth0 (172.17.0.2)                                      │
+│    │                                                     │
+│    │  "I only know my IP (172.17.0.2) and my gateway     │
+│    │   (172.17.0.1). I don't know about any host,        │
+│    │   bridge, physical NIC, or NAT. I'm blind."         │
+│    │                                                     │
+│    │  Routing table:                                     │
+│    │    0.0.0.0/0 via 172.17.0.1 dev eth0               │
+│    │                                                     │
+│    ▼                                                     │
+│  ┌──── veth pair ─────────────── NAMESPACE BOUNDARY ──── │
+│  │  (invisible kernel tunnel)                            │
+└──┼───────────────────────────────────────────────────────┘
+   │
+   ▼
+┌──┼───────────────────────────────────────────────────────┐
+│  │                                  Host Namespace        │
+│  vethXXXXXX ──── docker0 (172.17.0.1) ──── eth0 (host)  │
+│                                                           │
+│  "I see everything: the container's packet, the bridge,   │
+│   the physical NIC, the iptables rules, the NAT."         │
+└───────────────────────────────────────────────────────────┘
+```
+
+### eth0 Does NOT Do NAT
+
+A common misconception is that the container's `eth0` somehow translates addresses. It does not. The container's `eth0` simply transmits packets with its own private source IP (`172.17.0.2`). NAT (specifically SNAT/masquerade) happens at the **host level**, in the host's iptables `nat` table, right before the packet leaves the physical NIC. The container is completely unaware that its source IP gets rewritten.
+
+---
+
+## Reconciling the "Gateway" vs "veth" Explanations
+
+When learning container networking, you will encounter two seemingly different explanations of how traffic leaves a container:
+
+1. **"The container sends to its gateway `172.17.0.1`"** -- routing table perspective
+2. **"The packet goes through the veth pair to docker0"** -- physical plumbing perspective
+
+Both are correct simultaneously. They describe the same packet flow at different layers of abstraction.
+
+### The Key Insight
+
+`172.17.0.1` **IS** the `docker0` bridge interface. The gateway IP in the container's routing table is literally the IP address assigned to `docker0` in the host namespace. When the container "sends to the gateway," the packet physically travels through the veth tunnel to arrive at `docker0`, which owns that IP.
+
+### Combined Diagram: Both Layers Mapped Together
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  LOGICAL VIEW (IP Layer)           PHYSICAL VIEW (Plumbing Layer)       │
+│  ─────────────────────────         ──────────────────────────────       │
+│                                                                          │
+│  Container 172.17.0.2              Container namespace                   │
+│       │                                 │                                │
+│       │ "send to gateway               eth0 (container end of veth)     │
+│       │  172.17.0.1"                    │                                │
+│       │                                 │ ← veth kernel tunnel           │
+│       ▼                                 ▼                                │
+│  Gateway 172.17.0.1         ====  docker0 bridge (has IP 172.17.0.1)    │
+│       │                                 │                                │
+│       │ "route to internet             Host routing table consulted      │
+│       │  via default gw"                │                                │
+│       ▼                                 ▼                                │
+│  Host default gateway         iptables POSTROUTING (SNAT here)          │
+│       │                                 │                                │
+│       ▼                                 ▼                                │
+│  Internet                     Physical NIC (eth0/ens4)                   │
+│                                         │                                │
+│                                         ▼                                │
+│                                    Physical network                      │
+│                                                                          │
+│  MAPPING: The "gateway 172.17.0.1" in the logical view IS the docker0   │
+│  bridge in the physical view. They are the same device.                  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+The container kernel resolves the gateway via ARP. It sends an ARP request for `172.17.0.1`. This ARP travels through the veth pair to `docker0`. Since `docker0` owns that IP, the bridge itself answers the ARP with its MAC address. The container then addresses all outbound Ethernet frames to that MAC, which means all traffic physically arrives at `docker0`.
+
+---
+
+## When SNAT Happens and When It Doesn't
+
+Not all container traffic gets NAT'd. The rule is simple: **SNAT only happens when traffic needs to leave the physical machine for a network that cannot route private container IPs.** There are three distinct scenarios.
+
+### Scenario 1: Container-to-Container (Same Host) -- No NAT
+
+```
+Container A (172.17.0.2)              Container B (172.17.0.3)
+       │                                       ▲
+       │  src=172.17.0.2 dst=172.17.0.3       │
+       ▼                                       │
+   eth0 (veth)                             eth0 (veth)
+       │                                       ▲
+       ▼                                       │
+   veth1 ────── docker0 (L2 switch) ────── veth2
+                     │
+                     │  docker0 sees dst MAC belongs to veth2
+                     │  Switches frame directly. Pure L2.
+                     │
+                     │  NO routing. NO iptables. NO NAT.
+                     │  Source IP stays 172.17.0.2 end-to-end.
+```
+
+`docker0` acts as a **dumb L2 switch** here. It learns MAC-to-port mappings and forwards the Ethernet frame to the correct veth port. The packet never enters the host's IP routing stack, never hits iptables, and the source IP is never rewritten.
+
+### Scenario 2: Container-to-Host -- No NAT
+
+```
+Container A (172.17.0.2)              Host process (listening on 172.17.0.1:8080)
+       │                                       ▲
+       │  src=172.17.0.2 dst=172.17.0.1       │
+       ▼                                       │
+   eth0 (veth) ──── docker0 bridge ────────────┘
+                        │
+                        │  docker0 has IP 172.17.0.1
+                        │  Packet is destined for docker0 itself
+                        │  Host kernel delivers to local socket
+                        │
+                        │  NO NAT needed. The host manages the
+                        │  172.17.0.0/16 subnet and knows exactly
+                        │  what 172.17.0.2 is. It processes the
+                        │  request directly and responds.
+```
+
+The host is the "all-seeing parent" -- it manages the entire `172.17.0.0/16` subnet via docker0. It can reach all container IPs natively. No address translation is needed.
+
+### Scenario 3: Container-to-Internet -- SNAT Happens HERE
+
+```
+Container A (172.17.0.2)                        Internet (google.com)
+       │                                                ▲
+       │  src=172.17.0.2 dst=142.250.80.46             │
+       ▼                                                │
+   eth0 → veth → docker0 → host routing                │
+                               │                        │
+                               ▼                        │
+                    iptables POSTROUTING:                │
+                    MASQUERADE rule fires                │
+                               │                        │
+                    src rewritten:                       │
+                      172.17.0.2 → 10.128.0.5          │
+                               │                        │
+                               ▼                        │
+                    Physical NIC (10.128.0.5) ──────────┘
+                               │
+                    src=10.128.0.5 dst=142.250.80.46
+                    (internet can route this)
+```
+
+SNAT happens at the **last moment** before the packet leaves the physical NIC. The host's iptables `nat` table has the masquerade rule:
+
+```
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+```
+
+This rule matches only when the outgoing interface is NOT `docker0` (i.e., traffic is heading out to the physical network). Private IPs like `172.17.0.x` are not routable on the internet -- routers along the path would drop them. SNAT rewrites the source to the host's real IP so the internet can route the response back.
+
+### Summary Table
+
+| Scenario | Source IP at destination | NAT? | Why |
+|---|---|---|---|
+| Container → Container (same host) | `172.17.0.2` (original) | No | Pure L2 switching on docker0. Both parties are on the same subnet. |
+| Container → Host | `172.17.0.2` (original) | No | Host manages the container subnet. It knows how to reach container IPs. |
+| Container → Internet | `10.128.0.5` (host IP) | SNAT | Internet cannot route private IPs. Host masquerades the source. |
+
+> **Key insight:** `docker0` does NOT do SNAT. It is just a switch. SNAT is done by the host's iptables, only when traffic needs to leave the machine. The isolation is one-way: the container cannot see the host, but the host knows everything about its containers.
+
+---
+
+## Kubernetes Pod Networking -- The Same Model, Elevated to a Law
+
+Docker's container networking is a convention. Kubernetes turns it into a **strict requirement**: the [Kubernetes Network Model](https://kubernetes.io/docs/concepts/cluster-administration/networking/) mandates that **every Pod must be able to communicate with every other Pod using its real IP address, without NAT**. This applies across nodes, across zones, across the entire cluster.
+
+The three traffic flows parallel Docker's model, but with the cross-node requirement adding complexity.
+
+### Flow 1: Pod-to-Pod Same Node -- No NAT
+
+Identical to Docker's container-to-container flow. The CNI plugin creates a bridge (`cni0` or `cbr0`) or uses PtP routes, and traffic is switched/routed locally.
+
+```
+Pod A (10.244.1.2)                     Pod B (10.244.1.3)
+       │                                       ▲
+       │  src=10.244.1.2 dst=10.244.1.3       │
+       ▼                                       │
+   eth0 (veth)                             eth0 (veth)
+       │                                       ▲
+       ▼                                       │
+   vethA ─── cni0 bridge (or PtP route) ── vethB
+                    │
+                    │  Same as Docker.
+                    │  No NAT. Source IP preserved.
+```
+
+### Flow 2: Pod-to-Pod Different Node -- No NAT (CNI Handles Cross-Node Routing)
+
+This is where the CNI plugin earns its keep. The Pod's original source IP MUST be preserved across nodes -- no SNAT. Different CNIs achieve this differently:
+
+```
+┌─ Node 1 ───────────────────────────┐    ┌─ Node 2 ───────────────────────────┐
+│                                      │    │                                      │
+│  Pod A (10.244.1.2)                 │    │  Pod B (10.244.2.5)                 │
+│       │                              │    │       ▲                              │
+│       │  src=10.244.1.2              │    │       │  src=10.244.1.2             │
+│       │  dst=10.244.2.5             │    │       │  dst=10.244.2.5             │
+│       ▼                              │    │       │                              │
+│   eth0 → veth → host routing        │    │   host routing → veth → eth0       │
+│       │                              │    │       ▲                              │
+│       ▼                              │    │       │                              │
+│   ┌───────────────────────────┐     │    │   ┌───────────────────────────┐     │
+│   │ CNI cross-node transport  │     │    │   │ CNI cross-node transport  │     │
+│   │                           │     │    │   │                           │     │
+│   │ Flannel: VXLAN tunnel     │─────┼────┼──>│ Flannel: VXLAN decap     │     │
+│   │   outer: Node1→Node2     │     │    │   │   inner: original IPs     │     │
+│   │   inner: Pod A→Pod B     │     │    │   │                           │     │
+│   │                           │     │    │   │                           │     │
+│   │ Calico: BGP route         │─────┼────┼──>│ Calico: BGP route         │     │
+│   │   Node2 knows 10.244.1.0 │     │    │   │   Node1 knows 10.244.2.0 │     │
+│   │   is reachable via Node1  │     │    │   │   is reachable via Node2  │     │
+│   └───────────────────────────┘     │    │   └───────────────────────────┘     │
+│       │                              │    │       ▲                              │
+│       ▼                              │    │       │                              │
+│   Physical NIC (192.168.1.10)       │    │   Physical NIC (192.168.1.11)       │
+│                                      │    │                                      │
+└──────────────────────────────────────┘    └──────────────────────────────────────┘
+                    │                                       ▲
+                    └───── Physical Network (L2/L3) ────────┘
+
+Source IP 10.244.1.2 is preserved end-to-end. NO NAT.
+```
+
+**Flannel (VXLAN)**: Encapsulates the original packet inside a VXLAN/UDP packet. The outer header uses node IPs (`192.168.1.10` → `192.168.1.11`). The inner header preserves Pod IPs (`10.244.1.2` → `10.244.2.5`). The receiving node decapsulates and delivers the inner packet.
+
+**Calico (BGP)**: Uses BGP to advertise Pod subnets across nodes. Node 2's routing table has: `10.244.1.0/24 via 192.168.1.10`. Packets are forwarded natively at L3 -- no encapsulation. The physical network routes based on these advertised routes.
+
+### Flow 3: Pod-to-Internet -- SNAT at the Node
+
+Same as Docker. When a Pod sends traffic to the public internet, the node's iptables masquerade rule rewrites the source IP from the Pod IP to the node's IP.
+
+```
+Pod A (10.244.1.2) → veth → host routing → iptables MASQUERADE
+       │
+       │  src rewritten: 10.244.1.2 → 192.168.1.10 (node IP)
+       ▼
+Physical NIC → Internet
+
+Only happens for traffic leaving the cluster.
+Pod-to-Pod traffic (even cross-node) is NEVER NAT'd.
+```
+
+The Kubernetes `ip-masq-agent` (or equivalent CNI configuration) controls exactly which destination CIDRs are considered "external" and should trigger masquerade. Typically, the Pod CIDR and Service CIDR are excluded from masquerade (traffic to these ranges keeps the original Pod source IP), while everything else gets SNAT'd.
+
+---
+
+## The Role of CNI -- The Master Electrician
+
+The **CNI (Container Network Interface)** is a specification and a set of plugins. A CNI plugin is NOT a router, NOT a switch, NOT a wire. It is the **software that BUILDS the networking infrastructure** when a Pod starts, and tears it down when the Pod dies. Once the wiring is in place, the CNI goes dormant -- the Linux kernel handles all actual packet forwarding at runtime.
+
+### What the CNI Does at Pod Startup vs Runtime
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     CNI PLUGIN ACTIONS (Pod Startup)                      │
+│                     ────────────────────────────────                      │
+│                                                                          │
+│  kubelet calls CNI binary:  /opt/cni/bin/<plugin> ADD                   │
+│                                                                          │
+│  1. CREATE veth pair                                                     │
+│     └─ ip link add veth_host type veth peer name eth0                   │
+│                                                                          │
+│  2. MOVE one end into Pod's network namespace                            │
+│     └─ ip link set eth0 netns <pod_pid>                                 │
+│                                                                          │
+│  3. ASSIGN Pod IP (IPAM)                                                 │
+│     └─ ip addr add 10.244.1.2/24 dev eth0 (inside Pod ns)              │
+│     └─ IP allocated from node's Pod CIDR range                          │
+│                                                                          │
+│  4. PLUG veth into bridge OR set up PtP route                            │
+│     └─ Bridge mode: ip link set veth_host master cni0                   │
+│     └─ PtP mode:    ip route add 10.244.1.2 dev cali1234 scope link    │
+│                                                                          │
+│  5. SET default route inside Pod namespace                               │
+│     └─ ip route add default via 10.244.1.1 dev eth0                    │
+│                                                                          │
+│  6. PROGRAM cross-node routing (if needed)                               │
+│     └─ Flannel: ensure VXLAN tunnel interface (flannel.1) exists         │
+│     └─ Calico:  advertise new Pod route via BGP daemon                  │
+│                                                                          │
+│  7. WRITE iptables rules                                                 │
+│     └─ SNAT/masquerade for internet-bound traffic                       │
+│     └─ Network policy ACCEPT/DROP rules                                  │
+│                                                                          │
+│  8. RETURN Pod IP to kubelet (JSON on stdout)                            │
+│     └─ {"cniVersion":"1.0.0","ips":[{"address":"10.244.1.2/24"}]}      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     RUNTIME (Linux Kernel Handles Everything)             │
+│                     ────────────────────────────────────────              │
+│                                                                          │
+│  The CNI is dormant. The kernel does all the work:                       │
+│                                                                          │
+│  • veth pair:     kernel shuttles packets across namespace boundary      │
+│  • Bridge/route:  kernel forwards packets per routing table              │
+│  • iptables:      kernel's netfilter applies NAT/filter rules            │
+│  • VXLAN:         kernel encap/decap via flannel.1 interface             │
+│  • conntrack:     kernel tracks connections for stateful NAT             │
+│                                                                          │
+│  The CNI binary is NOT running. It was invoked once at Pod startup       │
+│  and once at Pod teardown. Everything in between is the kernel.          │
+│                                                                          │
+│  Analogy: The CNI is the plumber who installs the pipes and faucets.     │
+│  The Linux kernel is the water system that flows through them 24/7.      │
+│  The plumber goes home after installation.                               │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### CNI Specification
+
+The CNI spec (maintained at [containernetworking/cni](https://github.com/containernetworking/cni)) defines a simple contract:
+
+| Operation | When Called | What It Does |
+|---|---|---|
+| `ADD` | Pod starts | Create all networking for the Pod. Return the assigned IP. |
+| `DEL` | Pod stops | Tear down all networking for the Pod. Clean up routes, iptables, veth. |
+| `CHECK` | Periodic | Verify networking is still healthy. Optional. |
+| `VERSION` | Any time | Report supported CNI spec versions. |
+
+The kubelet calls the CNI binary as an exec (not a long-running daemon). The binary reads a JSON config from stdin, performs its work, and writes a JSON result to stdout. This simplicity is by design -- it makes CNI plugins easy to write and swap.
+
+---
+
+## Point-to-Point (PtP) Routing -- Bypassing the Bridge
+
+The bridge model (used by Docker and Flannel) works but has overhead. In **PtP (Point-to-Point) routing**, used by CNIs like Calico, the host-side end of the veth pair is NOT plugged into any bridge. Instead, the CNI writes a direct route in the host's routing table pointing to that specific veth interface.
+
+### How PtP Works
+
+```
+┌─ Bridge Model (Docker/Flannel) ──────┐  ┌─ PtP Model (Calico) ─────────────┐
+│                                        │  │                                    │
+│  Host routing table:                   │  │  Host routing table:               │
+│    10.244.1.0/24 dev cni0             │  │    10.244.1.2 dev cali1234         │
+│                                        │  │    10.244.1.3 dev cali5678         │
+│  cni0 bridge                           │  │    10.244.1.4 dev cali9abc         │
+│   ├── veth1 ←→ Pod A (10.244.1.2)    │  │                                    │
+│   ├── veth2 ←→ Pod B (10.244.1.3)    │  │  cali1234 ←→ Pod A (10.244.1.2)  │
+│   └── veth3 ←→ Pod C (10.244.1.4)    │  │  cali5678 ←→ Pod B (10.244.1.3)  │
+│                                        │  │  cali9abc ←→ Pod C (10.244.1.4)  │
+│  Packets go:                           │  │                                    │
+│    Pod A → veth1 → cni0 (L2 switch)  │  │  Packets go:                       │
+│    → veth2 → Pod B                    │  │    Pod A → cali1234 → host L3      │
+│                                        │  │    routing → cali5678 → Pod B      │
+│  L2: ARP, MAC learning, broadcast     │  │                                    │
+│                                        │  │  Pure L3: no ARP between Pods,     │
+│                                        │  │  no MAC learning, no broadcast     │
+└────────────────────────────────────────┘  └────────────────────────────────────┘
+```
+
+### Why No ARP Is Needed in PtP
+
+In PtP mode, each veth has a `/32` route. The host knows: "For IP `10.244.1.2`, send down interface `cali1234`." There is exactly one possible destination at the end of that pipe. The host does not need to ARP for the next-hop because there is only one device on the link.
+
+For the Pod side, the Pod's default route points to a link-local address (`169.254.1.1`). The host-side veth has `proxy_arp` enabled, so it answers ARP requests for `169.254.1.1` with its own MAC. The Pod sends all outbound frames to that MAC, and they arrive at the host for L3 routing.
+
+### PtP vs Bridge: Trade-offs
+
+| Aspect | Bridge Model | PtP Model (Calico) |
+|---|---|---|
+| **L2 overhead** | ARP tables, MAC learning, broadcast flooding | None. Pure L3 forwarding. |
+| **CPU usage** | Higher (L2 switch simulation per packet) | Lower (direct route lookup) |
+| **Broadcast storms** | Possible in large clusters (ARP for every Pod) | Zero ARP traffic between Pods |
+| **Security** | MAC spoofing possible; shared L2 domain means Pods can sniff frames | No shared L2 domain. Each veth is isolated. No MAC spoofing. |
+| **Routing table size** | One subnet route per node (e.g., `10.244.1.0/24 dev cni0`) | One `/32` route per Pod. 500 Pods = 500 route entries. |
+| **Synchronization** | Minimal (bridge auto-learns MACs) | CNI must keep routing table perfectly synchronized with Pod lifecycle |
+| **Cross-node routing** | Overlay (VXLAN) | BGP (routes shared across nodes) |
+
+### The Trade-off: Routing Table Size
+
+The PtP model's main cost is that the host routing table must have an entry for **every Pod on that node**. On a node with 500 Pods, that is 500 routing entries. The CNI daemon (e.g., Calico's Felix agent) must ensure these routes are perfectly synchronized with Pod lifecycle -- adding routes when Pods start and removing them when Pods die. A stale route for a dead Pod means traffic to that IP goes into a dead veth and is silently dropped.
+
+For cross-node traffic, Calico uses **BGP** to advertise each node's Pod routes to other nodes. Each node's routing table also contains entries like `10.244.2.0/24 via 192.168.1.11` -- meaning "Pods in the `10.244.2.0/24` range are reachable via Node 2's IP." The Calico BGP daemon (BIRD) handles this advertisement automatically.
+
+---
+
 ## See also
 
 - [[notes/Networking/docker-proxy-networking-in-k8s|Docker Proxy Networking in K8s]]
@@ -1074,6 +1480,9 @@ A final important distinction that trips people up:
 - [AWS VPC CNI Plugin](https://github.com/aws/amazon-vpc-cni-k8s)
 - [conntrack-tools](https://conntrack-tools.netfilter.org/)
 - [nf_conntrack (kernel docs)](https://www.kernel.org/doc/html/latest/networking/nf_conntrack-sysctl.html)
+- [CNI Specification](https://github.com/containernetworking/cni/blob/main/SPEC.md)
+- [Flannel (VXLAN backend)](https://github.com/flannel-io/flannel)
+- [Calico BGP Peering](https://docs.tigera.io/calico/latest/networking/configuring/bgp)
 
 ---
 
@@ -1209,3 +1618,86 @@ EndpointSlices shard the endpoint list into chunks of ~100 endpoints each. When 
 **A:** They are completely real. kube-proxy uses the standard `iptables` (or `nft`) binary to write rules into the Linux kernel's netfilter subsystem in the node's root network namespace. You can inspect them with `iptables -t nat -L -n` on any node. They use the same `PREROUTING`, `OUTPUT`, and `POSTROUTING` chains as any manually written firewall rule.
 
 There is nothing "virtual" about them. The kernel's netfilter processes every packet through these chains. The only thing kube-proxy automates is the creation and deletion of rules -- reacting to Service and EndpointSlice changes from the Kubernetes API. If kube-proxy crashed and you manually wrote the same rules, the behavior would be identical.
+
+---
+
+### Q: Does the container's eth0 interface do NAT? Where does SNAT actually happen?
+
+**A:** No. The container's `eth0` only knows its own private IP (e.g., `172.17.0.2`). It has no awareness of the host's IP, iptables rules, or NAT configuration. NAT happens at the **host level** -- specifically in the host's iptables `nat` table, in the `POSTROUTING` chain, right before the packet leaves the physical NIC.
+
+The masquerade rule (`-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE`) only fires when traffic is leaving via an interface that is NOT `docker0` -- meaning it is heading to the external network. For container-to-container traffic (stays on the bridge) and container-to-host traffic (destination is the bridge IP), no NAT happens at all. SNAT only occurs when traffic needs to leave the machine for the public internet, because private IPs (`172.17.x.x`, `10.244.x.x`) are not routable on the internet.
+
+---
+
+### Q: The container sends to gateway 172.17.0.1, but traffic also goes through veth pairs and docker0. How do these two explanations fit together?
+
+**A:** They are the same thing viewed from two different layers:
+
+- **IP layer (logical view)**: The container's routing table says "send to gateway `172.17.0.1` via `eth0`." This is the routing decision.
+- **Plumbing layer (physical view)**: The packet travels `eth0` → veth kernel tunnel → `docker0` bridge.
+
+The key: `172.17.0.1` IS the IP address assigned to the `docker0` bridge interface. When the container sends to its gateway, it first ARPs for `172.17.0.1`. That ARP travels through the veth pair to `docker0`, which owns that IP and responds with its MAC. All subsequent traffic is addressed to docker0's MAC, so it physically arrives at docker0 through the veth tunnel.
+
+```
+Container routing table:           Physical path:
+  "send to 172.17.0.1"     ===     eth0 → veth → docker0 (IS 172.17.0.1)
+```
+
+They are not two different paths -- they are two descriptions of the same path at different abstraction levels.
+
+---
+
+### Q: Walk through the three scenarios: container-to-container, container-to-host, container-to-internet. When does NAT happen in each?
+
+**A:**
+
+**Container-to-Container (same host)**: No NAT. The packet goes `Container A eth0 → veth → docker0 (L2 switch) → veth → Container B eth0`. The bridge acts as a dumb L2 switch, forwarding the Ethernet frame based on MAC addresses. The source IP (`172.17.0.2`) arrives unchanged at Container B. No routing, no iptables, no NAT -- pure Layer 2 switching.
+
+**Container-to-Host**: No NAT. The container sends to `172.17.0.1` (or any host IP). The packet travels through the veth pair to docker0. Since the destination is docker0's own IP (or another host interface), the host kernel processes it locally. The host manages the `172.17.0.0/16` subnet and knows the container's IP natively. No address translation needed.
+
+**Container-to-Internet**: SNAT happens. The packet travels `eth0 → veth → docker0 → host routing → iptables POSTROUTING`. The masquerade rule rewrites the source from `172.17.0.2` to the host's real IP (e.g., `10.128.0.5`). This happens at the last moment, right before the packet exits the physical NIC. The internet cannot route private IPs, so SNAT is mandatory. Conntrack records the mapping so return traffic can be un-SNAT'd back to `172.17.0.2`.
+
+---
+
+### Q: What does the CNI actually do vs what does the Linux kernel do?
+
+**A:** The CNI plugin is invoked **twice** per Pod lifetime: once at startup (`ADD`) and once at teardown (`DEL`). During `ADD`, it builds all the networking infrastructure:
+
+1. Creates the veth pair
+2. Moves one end into the Pod's namespace
+3. Assigns a Pod IP (IPAM -- IP Address Management)
+4. Plugs the host-side veth into a bridge, or writes a PtP route in the host routing table
+5. Sets the default route inside the Pod namespace
+6. Programs cross-node routing (VXLAN tunnel for Flannel, BGP advertisement for Calico)
+7. Writes iptables rules for SNAT/masquerade and network policy
+
+After `ADD` completes, the CNI binary exits. It is not a long-running daemon (though many CNI implementations have a separate daemon for route synchronization, like Calico's Felix).
+
+At **runtime**, the Linux kernel handles everything: the veth pair shuttles packets across namespace boundaries, the routing table directs forwarding, iptables/netfilter applies NAT and filtering, conntrack tracks connections, and VXLAN interfaces encapsulate/decapsulate if needed. The CNI built the plumbing; the kernel is the water flowing through it.
+
+---
+
+### Q: What is Point-to-Point routing and why do CNIs like Calico prefer it over bridges?
+
+**A:** In PtP routing, the host-side end of the veth pair is NOT plugged into any bridge. Instead, the CNI writes a direct `/32` route in the host's routing table: `10.244.1.2 dev cali1234 scope link`. This tells the kernel: "To reach IP `10.244.1.2`, send the packet down interface `cali1234`." There is exactly one device at the other end of that veth, so no ARP is needed to find the destination.
+
+Benefits over the bridge model:
+- **Less CPU**: No L2 switch simulation. No MAC learning, no forwarding database lookups. Pure L3 route lookup.
+- **No broadcast storms**: Zero ARP traffic between Pods. In a bridge model with 500 Pods, every new connection triggers ARP broadcasts to all 500 veth ports. In PtP mode, there are no broadcasts at all.
+- **Better security**: No shared L2 domain means Pods cannot sniff each other's traffic or spoof MAC addresses.
+- **Simpler model**: Operates purely at L3. No mixed L2/L3 semantics to debug.
+
+The trade-off is that the host routing table must have one entry per Pod (not per subnet). A node with 500 Pods has 500 route entries. The CNI daemon must keep this table perfectly synchronized with Pod lifecycle. Calico's Felix agent handles this, and uses BGP (via BIRD) to advertise these routes to other nodes for cross-node Pod-to-Pod communication.
+
+---
+
+### Q: In Kubernetes, does Pod-to-Pod traffic across nodes go through NAT?
+
+**A:** No. The Kubernetes Network Model (documented in the official [Cluster Networking](https://kubernetes.io/docs/concepts/cluster-administration/networking/) docs) strictly requires that every Pod can communicate with every other Pod using its real IP address, **without NAT**. This is not a suggestion -- it is a hard requirement that every conformant CNI plugin must satisfy.
+
+The CNI handles cross-node routing while preserving the original source IP:
+- **Flannel (VXLAN)**: Encapsulates the entire Pod-to-Pod packet inside a VXLAN/UDP packet. The outer header uses node IPs for routing across the physical network; the inner header preserves the original Pod IPs untouched. The receiving node decapsulates and delivers the inner packet.
+- **Calico (BGP)**: Advertises Pod subnet routes via BGP so that each node's routing table knows which node to forward to for each Pod CIDR. No encapsulation at all -- packets are routed natively at L3. The source IP is never rewritten.
+- **AWS VPC CNI**: Assigns real VPC IPs to Pods, so the cloud routing fabric handles everything natively.
+
+SNAT only happens for traffic leaving the cluster to the public internet (controlled by the `ip-masq-agent` or CNI configuration). Pod-to-Pod traffic, even across nodes and across availability zones, always preserves the original Pod IP.
