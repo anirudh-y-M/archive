@@ -650,6 +650,172 @@ ipvsadm -Ln
 
 ---
 
+## End-to-End: Pod-to-Service Packet Lifecycle
+
+This is where all the concepts -- DNS, veth pairs, kube-proxy, iptables, DNAT, conntrack, and routing -- converge into a single event. The key insight that unlocks understanding:
+
+> **Packets do not flow through kube-proxy.** kube-proxy is not a proxy in the data path. It is a control-plane agent that writes iptables rules *before* any packet is ever sent. Think of it as the construction worker who built the road signs before you started driving -- not a tollbooth you pass through.
+
+### Phase 1: The Pre-Game Setup (Before Any Packet Is Sent)
+
+This phase happens when Services and Pods are created, long before any application sends a request.
+
+```
+┌─ Kubernetes Control Plane ─────────────────────────────────────────────────┐
+│                                                                             │
+│  1. Service "backend-svc" created → ClusterIP 10.96.0.10:80               │
+│  2. Pods selected by label selector → EndpointSlice updated:              │
+│       10.244.1.2:8080, 10.244.1.3:8080, 10.244.2.5:8080                  │
+│                                                                             │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ API watch event
+                                       ▼
+┌─ kube-proxy (on EVERY Node) ──────────────────────────────────────────────┐
+│                                                                             │
+│  Sees the update. Immediately writes iptables rules into the              │
+│  host kernel's netfilter tables:                                           │
+│                                                                             │
+│    "If any packet arrives destined for 10.96.0.10:80:                     │
+│       → pick one of [10.244.1.2, 10.244.1.3, 10.244.2.5] at random       │
+│       → rewrite destination IP (DNAT)                                      │
+│       → send it on its way"                                                │
+│                                                                             │
+│  kube-proxy is now DONE. It goes to sleep until a Pod is added/deleted.   │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 2: The Pod Sends a Request
+
+The frontend Pod wants to talk to `backend-svc`. The application does a DNS lookup, CoreDNS resolves `backend-svc.default.svc.cluster.local` to `10.96.0.10`, and the Pod creates a packet.
+
+```
+┌─ Frontend Pod Namespace ──────────────────────────────────────────────────┐
+│                                                                             │
+│  App: "GET /api/data" → dst = 10.96.0.10:80                              │
+│                                                                             │
+│  Kernel builds packet:                                                     │
+│    src = 10.244.1.7:52340    dst = 10.96.0.10:80                          │
+│                                                                             │
+│  Routing table says: default via 169.254.1.1 dev eth0                     │
+│  Packet exits through eth0 → down the veth cable                          │
+│                                                                             │
+└─────────────────────────┬─────────────────────────────────────────────────┘
+                          │ veth pair
+                          ▼
+┌─ Host Root Namespace ─────────────────────────────────────────────────────┐
+│                                                                             │
+│  Packet pops out of the veth peer (e.g., cali12345abc)                    │
+│  into the host's network stack.                                            │
+│                                                                             │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 3: The Interception and Load Balancing
+
+This is the critical phase. It is handled entirely by the **Linux kernel's netfilter/iptables** -- not kube-proxy. kube-proxy is sleeping.
+
+```
+┌─ Host Kernel (netfilter processing) ──────────────────────────────────────┐
+│                                                                             │
+│  Step 1 — Interception:                                                    │
+│    Packet enters host network stack.                                       │
+│    Destination is 10.96.0.10 (a Service IP — no real interface has it).   │
+│    Before normal routing, packet hits the iptables PREROUTING chain.      │
+│    → Matches KUBE-SERVICES rule for 10.96.0.10:80                         │
+│    → Jumps to KUBE-SVC-XXXX chain                                         │
+│                                                                             │
+│  Step 2 — Load Balancing (random selection):                               │
+│    KUBE-SVC-XXXX uses iptables' statistical probability module:           │
+│                                                                             │
+│      ┌─────────────────────────────────────────────────────┐              │
+│      │  Rule 1: p=0.333 → KUBE-SEP-AAA (10.244.1.2:8080) │              │
+│      │  Rule 2: p=0.500 → KUBE-SEP-BBB (10.244.1.3:8080) │  ← selected │
+│      │  Rule 3: remainder → KUBE-SEP-CCC (10.244.2.5:8080)│              │
+│      └─────────────────────────────────────────────────────┘              │
+│                                                                             │
+│  Step 3 — DNAT (rewrite):                                                  │
+│    Kernel rewrites the destination IP on the packet:                       │
+│                                                                             │
+│      BEFORE:  src=10.244.1.7:52340  dst=10.96.0.10:80                     │
+│      AFTER:   src=10.244.1.7:52340  dst=10.244.1.3:8080                   │
+│                                                                             │
+│  Step 4 — conntrack entry created:                                         │
+│    Kernel records this translation in the conntrack table:                 │
+│    "Connection from 10.244.1.7:52340 to 10.96.0.10:80                     │
+│     was translated to 10.244.1.3:8080.                                     │
+│     All future packets for this connection → same destination."            │
+│    This means subsequent packets skip the iptables rule walk entirely.    │
+│                                                                             │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 4: Delivery
+
+The packet now has a real Pod IP (`10.244.1.3`). Standard Linux routing takes over.
+
+```
+┌─ Routing Decision ───────────────────────────────────────────────────────┐
+│                                                                            │
+│  Destination: 10.244.1.3                                                  │
+│                                                                            │
+│  Case A — Target Pod is on the SAME Node:                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐     │
+│  │  Host routing table matches 10.244.1.3 → local veth peer        │     │
+│  │  Packet is pushed down the veth cable into the target Pod's     │     │
+│  │  namespace → arrives at Pod's eth0 → delivered to app on :8080  │     │
+│  └──────────────────────────────────────────────────────────────────┘     │
+│                                                                            │
+│  Case B — Target Pod is on a DIFFERENT Node:                              │
+│  ┌──────────────────────────────────────────────────────────────────┐     │
+│  │  Host routing table: 10.244.1.0/24 via <other-node-IP>          │     │
+│  │  Packet exits the Node's physical NIC (eth0/ens4)               │     │
+│  │  → crosses the physical/overlay network to Node 2               │     │
+│  │  → Node 2 receives it, routes to local veth peer                │     │
+│  │  → down the veth cable into the target Pod's namespace          │     │
+│  │  → delivered to app on :8080                                     │     │
+│  └──────────────────────────────────────────────────────────────────┘     │
+│                                                                            │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Complete Timeline View
+
+```
+TIME ──────────────────────────────────────────────────────────────────────►
+
+  SETUP PHASE (happens once)              REQUEST PHASE (every request)
+  ┌──────────────────────┐                ┌────────────────────────────────┐
+  │                      │                │                                │
+  │  K8s creates Service │                │  Pod does DNS lookup           │
+  │         │            │                │         │                      │
+  │         ▼            │                │         ▼                      │
+  │  kube-proxy watches  │                │  Gets Service IP               │
+  │         │            │                │         │                      │
+  │         ▼            │                │         ▼                      │
+  │  Writes iptables     │                │  Sends packet to Service IP    │
+  │  rules into kernel   │                │         │                      │
+  │         │            │                │         ▼                      │
+  │         ▼            │                │  Exits via veth to host        │
+  │  kube-proxy SLEEPS   │                │         │                      │
+  │                      │                │         ▼                      │
+  │  (nothing more to do │                │  Kernel hits iptables rules    │
+  │   until next update) │                │  (written by kube-proxy)       │
+  │                      │                │         │                      │
+  └──────────────────────┘                │         ▼                      │
+                                          │  DNAT rewrites dst IP          │
+                                          │         │                      │
+                                          │         ▼                      │
+                                          │  conntrack records mapping     │
+                                          │         │                      │
+                                          │         ▼                      │
+                                          │  Standard routing delivers     │
+                                          │  packet to real Pod            │
+                                          │                                │
+                                          └────────────────────────────────┘
+```
+
+---
+
 ## conntrack (Connection Tracking)
 
 ### The Fast Path
@@ -1688,6 +1854,41 @@ Benefits over the bridge model:
 - **Simpler model**: Operates purely at L3. No mixed L2/L3 semantics to debug.
 
 The trade-off is that the host routing table must have one entry per Pod (not per subnet). A node with 500 Pods has 500 route entries. The CNI daemon must keep this table perfectly synchronized with Pod lifecycle. Calico's Felix agent handles this, and uses BGP (via BIRD) to advertise these routes to other nodes for cross-node Pod-to-Pod communication.
+
+---
+
+### Q: Walk through the complete lifecycle of a Pod sending a request to a Kubernetes Service IP. What role does kube-proxy play?
+
+**A:** This requires understanding that kube-proxy operates in the **setup phase**, not the **data path**. Here is the chronological flow:
+
+```
+SETUP (one-time, when Service/Pods are created):
+  API server updates EndpointSlices
+       │
+       ▼
+  kube-proxy (on every Node) watches the update
+       │
+       ▼
+  Writes iptables rules: "dst=10.96.0.10:80 → DNAT to one of
+  [10.244.1.2, 10.244.1.3, 10.244.2.5] using probability-based selection"
+       │
+       ▼
+  kube-proxy SLEEPS (no further involvement until next EndpointSlice change)
+
+REQUEST (every time a Pod sends a packet):
+  1. Pod does DNS lookup → CoreDNS returns 10.96.0.10
+  2. Pod creates packet: src=10.244.1.7:52340 dst=10.96.0.10:80
+  3. Packet exits via eth0 → down veth cable → arrives in host namespace
+  4. Kernel's netfilter hits the iptables rules (written by kube-proxy)
+  5. Probability-based random selection picks a backend (e.g., 10.244.1.3)
+  6. DNAT: kernel rewrites dst to 10.244.1.3:8080
+  7. conntrack records the mapping (all future packets skip iptables)
+  8. Standard routing delivers the packet:
+     - Same node: down the target Pod's veth cable
+     - Different node: out physical NIC → other node → veth cable
+```
+
+The crucial insight: kube-proxy is a **control-plane agent**, not a data-plane proxy. It writes rules and sleeps. The kernel does all packet processing at wire speed. No userspace process touches the packet.
 
 ---
 
