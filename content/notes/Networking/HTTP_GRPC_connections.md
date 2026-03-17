@@ -1,6 +1,6 @@
 ---
-title: "HTTP Connection Behavior, Multiplexing, and gRPC Scaling in Go"
----
+
+## title: "HTTP Connection Behavior, Multiplexing, and gRPC Scaling in Go"
 
 ## ## Problem
 
@@ -16,11 +16,11 @@ The goal here is to explain **how Go’s HTTP client actually manages connection
 
 Before we dive deeper, here are key concepts:
 
-* **TCP Connection:** A connection established between client and server over TCP, usually with a three-way handshake and (for HTTPS) a TLS handshake.
-* **HTTP/1.1:** A version of HTTP where each connection typically handles only one request/response at a time.
-* **HTTP/2:** A binary, frame-based HTTP version that supports multiple requests/responses concurrently on a single TCP connection via multiplexing.
-* **Multiplexing:** Sending multiple independent streams (requests/responses) within the same TCP connection simultaneously.
-* **gRPC:** A high-performance RPC framework built on HTTP/2 and Protocol Buffers (binary serialization) that encourages connection reuse and streaming.
+- **TCP Connection:** A connection established between client and server over TCP, usually with a three-way handshake and (for HTTPS) a TLS handshake.
+- **HTTP/1.1:** A version of HTTP where each connection typically handles only one request/response at a time.
+- **HTTP/2:** A binary, frame-based HTTP version that supports multiple requests/responses concurrently on a single TCP connection via multiplexing.
+- **Multiplexing:** Sending multiple independent streams (requests/responses) within the same TCP connection simultaneously.
+- **gRPC:** A high-performance RPC framework built on HTTP/2 and Protocol Buffers (binary serialization) that encourages connection reuse and streaming.
 
 ---
 
@@ -49,8 +49,8 @@ The Transport controls the connection pool, DNS resolution, TCP handshakes, and 
 
 **Summary:**
 
-* Creating a client does *not* open a connection.
-* A connection is opened only when you make your first request.
+- Creating a client does *not* open a connection.
+- A connection is opened only when you make your first request.
 
 ---
 
@@ -79,8 +79,8 @@ Only now does the TCP connection get established.
 
 HTTP/1.1 supports:
 
-* Keep-Alive: reusing a connection for multiple sequential requests
-* But **only one in-flight request per connection**
+- Keep-Alive: reusing a connection for multiple sequential requests
+- But **only one in-flight request per connection**
 
 Example (sequential):
 
@@ -106,8 +106,8 @@ for i := 0; i < 100; i++ {
 
 Go may open:
 
-* Many TCP connections,
-* Almost one per goroutine, because HTTP/1.1 cannot handle multiple concurrent requests on a single connection.
+- Many TCP connections,
+- Almost one per goroutine, because HTTP/1.1 cannot handle multiple concurrent requests on a single connection.
 
 `http.Transport` has adjustable limits:
 
@@ -123,8 +123,8 @@ If `MaxConnsPerHost` is low, extra requests wait.
 
 **Summary:**
 
-* HTTP/1.1 needs multiple TCP connections to do concurrent requests.
-* Each connection has handshake cost and resource overhead.
+- HTTP/1.1 needs multiple TCP connections to do concurrent requests.
+- Each connection has handshake cost and resource overhead.
 
 ---
 
@@ -148,9 +148,9 @@ Frames are interleaved:
 
 This means:
 
-* Multiple requests/responses go through the same connection at the same time.
-* No waiting for previous responses.
-* One TCP/TLS handshake for many parallel streams.
+- Multiple requests/responses go through the same connection at the same time.
+- No waiting for previous responses.
+- One TCP/TLS handshake for many parallel streams.
 
 **The magic:** It supports **multiplexed streams** within one TCP connection.
 
@@ -186,8 +186,8 @@ All streams are processed without waiting.
 
 HTTP/2 removes blocking *at the HTTP level*, but:
 
-* If a **TCP packet is lost**, TCP delays delivery of later packets.
-* This is still network-level blocking, but not protocol (application) blocking.
+- If a **TCP packet is lost**, TCP delays delivery of later packets.
+- This is still network-level blocking, but not protocol (application) blocking.
 
 This is why HTTP/3 (QUIC) was designed later:
 
@@ -199,9 +199,9 @@ This is why HTTP/3 (QUIC) was designed later:
 
 Go’s default `http.Client`:
 
-* Will use HTTP/2 automatically if the server supports it
-* Uses one TCP connection per host
-* Supports many concurrent streams
+- Will use HTTP/2 automatically if the server supports it
+- Uses one TCP connection per host
+- Supports many concurrent streams
 
 Example:
 
@@ -213,9 +213,9 @@ for i := 0; i < 1000; i++ {
 
 If the server supports HTTP/2:
 
-* Go will likely use **one TCP connection**
-* Many Go routines send requests as many **streams**
-* Only one handshake cost
+- Go will likely use **one TCP connection**
+- Many Go routines send requests as many **streams**
+- Only one handshake cost
 
 If a server caps concurrent streams, extra streams wait but reuse the connection.
 
@@ -227,23 +227,23 @@ gRPC builds on HTTP/2 and adds several advantages:
 
 ### 1. **Persistent Connections**
 
-* gRPC keeps a long-lived channel open.
-* Hundreds/thousands of RPCs reuse one connection.
+- gRPC keeps a long-lived channel open.
+- Hundreds/thousands of RPCs reuse one connection.
 
 ### 2. **Binary Protocol (Protobuf)**
 
-* Smaller messages than JSON,
-* Faster to serialize/deserialize,
-* Less bandwidth, less CPU.
+- Smaller messages than JSON,
+- Faster to serialize/deserialize,
+- Less bandwidth, less CPU.
 
 ### 3. **Built-in Streaming**
 
 gRPC supports:
 
-* Unary calls
-* Server streaming
-* Client streaming
-* Bidirectional streaming
+- Unary calls
+- Server streaming
+- Client streaming
+- Bidirectional streaming
 
 This avoids repeated polling and connection churn.
 
@@ -251,8 +251,8 @@ This avoids repeated polling and connection churn.
 
 HTTP/2 has per-stream flow control:
 
-* Prevents flooding
-* Efficient resource usage
+- Prevents flooding
+- Efficient resource usage
 
 Compared to REST over HTTP/1.1, this is much more scalable.
 
@@ -260,13 +260,14 @@ Compared to REST over HTTP/1.1, this is much more scalable.
 
 gRPC avoids:
 
-* Multiple TCP/TLS handshakes
-* Many ephemeral ports
-* Many OS file descriptors
+- Multiple TCP/TLS handshakes
+- Many ephemeral ports
+- Many OS file descriptors
 
 ---
 
 ## ## Detailed Advantages Summary
+
 
 | Aspect            | HTTP/1.1 + REST      | HTTP/2 (Go)            | gRPC                    |
 | ----------------- | -------------------- | ---------------------- | ----------------------- |
@@ -275,6 +276,7 @@ gRPC avoids:
 | Protocol Overhead | High (text/JSON)     | Lower (binary framing) | Very low (Protobuf)     |
 | Flow Control      | None at app level    | Yes                    | Yes                     |
 | Streaming         | No                   | Yes                    | Yes, built-in           |
+
 
 ---
 

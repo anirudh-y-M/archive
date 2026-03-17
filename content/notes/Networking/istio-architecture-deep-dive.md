@@ -1319,6 +1319,1221 @@ kubectl exec deploy/my-app -c istio-proxy -- iptables -t nat -S
 
 ---
 
+## Envoy Proxy Deep Dive
+
+The earlier section covered Envoy's request processing pipeline (Listener -> Filter Chain -> Cluster -> Endpoint). This section goes deeper into Envoy's internal architecture, threading model, filter execution, connection management, and operational features like hot restart and health checking.
+
+### Threading Model
+
+Envoy uses a multi-threaded architecture with a strict thread-local design that avoids locks on the hot path. There are three categories of threads:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ENVOY THREADING MODEL                                 │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                        MAIN THREAD                                      │  │
+│  │                                                                         │  │
+│  │  - Startup / shutdown coordination                                      │  │
+│  │  - xDS API processing (receives config from istiod)                     │  │
+│  │  - Runtime config reloads                                               │  │
+│  │  - Stats flushing (periodic aggregation from workers)                   │  │
+│  │  - Admin API server (port 15000)                                        │  │
+│  │  - Cluster / listener management (creates, updates, drains)             │  │
+│  │                                                                         │  │
+│  │  Does NOT handle any data-plane traffic                                 │  │
+│  └────────────────────────────┬────────────────────────────────────────────┘  │
+│                               │                                              │
+│                    ┌──────────┴──────────┐                                   │
+│                    │  Thread-Local Store  │  Config snapshots pushed          │
+│                    │   (TLS mechanism)    │  from main → workers via          │
+│                    └──────────┬──────────┘  read-copy-update (RCU)           │
+│                               │                                              │
+│          ┌────────────────────┼────────────────────┐                         │
+│          ▼                    ▼                    ▼                          │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐                   │
+│  │  WORKER       │    │  WORKER       │    │  WORKER       │                  │
+│  │  THREAD 0     │    │  THREAD 1     │    │  THREAD N     │                  │
+│  │               │    │               │    │               │                  │
+│  │  - Own event  │    │  - Own event  │    │  - Own event  │                  │
+│  │    loop       │    │    loop       │    │    loop       │                  │
+│  │    (libevent) │    │    (libevent) │    │    (libevent) │                  │
+│  │               │    │               │    │               │                  │
+│  │  - Owns its   │    │  - Owns its   │    │  - Owns its   │                 │
+│  │    connections│    │    connections│    │    connections│                  │
+│  │               │    │               │    │               │                  │
+│  │  - Listener   │    │  - Listener   │    │  - Listener   │                 │
+│  │    filter     │    │    filter     │    │    filter     │                  │
+│  │    chains     │    │    chains     │    │    chains     │                  │
+│  │               │    │               │    │               │                  │
+│  │  - Upstream   │    │  - Upstream   │    │  - Upstream   │                 │
+│  │    conn pools │    │    conn pools │    │    conn pools │                  │
+│  │  (per-worker) │    │  (per-worker) │    │  (per-worker) │                 │
+│  └──────────────┘    └──────────────┘    └──────────────┘                   │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                     FILE FLUSH THREAD(S)                                │  │
+│  │  - Writes access logs to disk                                           │  │
+│  │  - Separate from workers to avoid blocking on I/O                       │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Key design principles:
+
+- **Non-blocking event loop**: Each worker thread runs a libevent-based event loop. All I/O (socket reads/writes, DNS, TLS handshakes) is asynchronous. A single worker can handle thousands of concurrent connections without blocking.
+- **Connection affinity**: Once the kernel accepts a connection on a listener socket, it is assigned to one worker thread for its entire lifetime. All downstream and corresponding upstream processing happen on that same thread -- no cross-thread locking needed.
+- **Thread-Local Storage (TLS)**: The main thread distributes configuration updates (new clusters, routes, secrets) to workers using a read-copy-update mechanism. Each worker holds a thread-local read-only snapshot of the config. Workers never contend on shared mutable state.
+- **Worker count**: Defaults to the number of hardware threads (cores). In Istio sidecar mode, `pilot-agent` typically sets `--concurrency` to match the CPU limit of the `istio-proxy` container (or 2 by default if no limit is set).
+
+The kernel distributes new connections across worker threads using `SO_REUSEPORT` -- each worker has its own listener socket bound to the same address, and the kernel load-balances incoming SYN packets across them.
+
+### Hot Restart
+
+Envoy supports zero-downtime binary upgrades and config reloads through a **hot restart** mechanism. This is how `pilot-agent` can restart Envoy without dropping connections:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                    HOT RESTART SEQUENCE                         │
+│                                                                │
+│  Time ──────────────────────────────────────────────────►      │
+│                                                                │
+│  ┌─────────────────────────────────────────────────┐          │
+│  │  Old Envoy Process (epoch N)                     │          │
+│  │                                                   │          │
+│  │  Accepting ──► Draining ──────────────► Exit      │          │
+│  │  connections    (stops accepting new    (after     │          │
+│  │                  connections, finishes  drain      │          │
+│  │                  in-flight requests)    period)    │          │
+│  └──────────┬──────────────────────────────────────┘          │
+│             │                                                  │
+│             │  1. New process starts                           │
+│             │  2. Connects to old process via                  │
+│             │     Unix domain socket                           │
+│             │  3. Shared memory region for                     │
+│             │     stats counters (so counters                  │
+│             │     don't reset across restarts)                 │
+│             │  4. Old process transfers listen                 │
+│             │     sockets via SCM_RIGHTS                       │
+│             ▼                                                  │
+│  ┌─────────────────────────────────────────────────┐          │
+│  │  New Envoy Process (epoch N+1)                   │          │
+│  │                                                   │          │
+│  │  Initializing ──► Accepting connections           │          │
+│  │  (receives        (takes over listener            │          │
+│  │   sockets,         sockets, serves                │          │
+│  │   loads config)    new connections)                │          │
+│  └─────────────────────────────────────────────────┘          │
+└───────────────────────────────────────────────────────────────┘
+```
+
+The hot restart process in detail:
+
+1. `pilot-agent` launches a new Envoy process with an incremented **restart epoch**.
+2. The new process connects to the old process over a Unix domain socket (the "hot restart RPC" channel).
+3. The old process transfers its **listener sockets** to the new process using Unix `SCM_RIGHTS` (file descriptor passing). This allows the new process to immediately begin accepting connections on the same addresses.
+4. Both processes share a **shared memory region** that holds stats counters. This ensures metric counters (e.g., total requests served) are not reset across restarts.
+5. The old process enters a **drain period** (configurable via `--drain-time-s`, default 600s in Istio). During draining, the old process stops accepting new connections but continues processing existing in-flight requests to completion.
+6. Once the drain period expires (or all connections close), the old process exits.
+
+> **Note:** In Istio sidecar mode, hot restart is less commonly triggered because Envoy receives configuration changes dynamically via xDS without needing a restart. Hot restart is more relevant when the Envoy binary itself is upgraded or when `pilot-agent` detects a crash and relaunches Envoy.
+
+### Filter Types in Depth
+
+Envoy's extensibility is built around a three-tier filter model. Filters execute in a chain, and each filter can inspect, modify, or terminate the request/response at its stage.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                       ENVOY FILTER PIPELINE                               │
+│                                                                           │
+│  Connection arrives at listener                                           │
+│         │                                                                 │
+│         ▼                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  LISTENER FILTERS  (L3/L4, pre-connection)                          │ │
+│  │                                                                      │ │
+│  │  Execute BEFORE a filter chain is selected.                          │ │
+│  │  Can inspect raw bytes, TLS ClientHello, proxy protocol header.      │ │
+│  │                                                                      │ │
+│  │  Examples:                                                            │ │
+│  │  - tls_inspector: reads SNI + ALPN from ClientHello (no decryption) │ │
+│  │  - http_inspector: sniffs first bytes to detect HTTP vs non-HTTP    │ │
+│  │  - proxy_protocol: reads PROXY protocol header (HAProxy format)      │ │
+│  │  - original_dst: recovers original destination (iptables redirect)   │ │
+│  └─────────────────────────────────────┬───────────────────────────────┘ │
+│                                        │                                  │
+│         Filter chain selected based on SNI/port/protocol                 │
+│                                        │                                  │
+│                                        ▼                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  NETWORK FILTERS  (L4, connection-level)                             │ │
+│  │                                                                      │ │
+│  │  Operate on raw TCP byte streams. Read/write data on the             │ │
+│  │  downstream connection. Can be read, write, or read/write filters.   │ │
+│  │                                                                      │ │
+│  │  Examples:                                                            │ │
+│  │  - tcp_proxy: forwards TCP to upstream cluster (terminal filter)     │ │
+│  │  - http_connection_manager (HCM): parses HTTP, runs HTTP filters    │ │
+│  │  - mongo_proxy: MongoDB wire protocol aware proxy                    │ │
+│  │  - mysql_proxy: MySQL wire protocol aware proxy                      │ │
+│  │  - redis_proxy: Redis protocol aware proxy                           │ │
+│  │  - rbac: L4 RBAC enforcement (source IP, port)                      │ │
+│  │  - ext_authz: L4 external authorization                             │ │
+│  │                                                                      │ │
+│  │  The last network filter in the chain must be a TERMINAL filter      │ │
+│  │  (e.g., tcp_proxy or http_connection_manager).                       │ │
+│  └─────────────────────────────────────┬───────────────────────────────┘ │
+│                                        │                                  │
+│         (Only if HCM is in the chain)  │                                  │
+│                                        ▼                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  HTTP FILTERS  (L7, request/response-level)                          │ │
+│  │                                                                      │ │
+│  │  Operate on decoded HTTP requests/responses. Each filter has         │ │
+│  │  decodeHeaders/decodeData (request path) and                         │ │
+│  │  encodeHeaders/encodeData (response path) callbacks.                 │ │
+│  │                                                                      │ │
+│  │  Request flow (decode):                                               │ │
+│  │  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐       │ │
+│  │  │ CORS   ├─►│ fault  ├─►│ RBAC   ├─►│ext_    ├─►│ router │       │ │
+│  │  │        │  │ inject │  │        │  │authz   │  │(terminal│       │ │
+│  │  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘       │ │
+│  │                                                                      │ │
+│  │  Response flow (encode):  ◄── reverse order ──                       │ │
+│  │  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐       │ │
+│  │  │ router ├─►│ext_    ├─►│ RBAC   ├─►│ fault  ├─►│ CORS   │       │ │
+│  │  │        │  │authz   │  │        │  │ inject │  │        │       │ │
+│  │  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘       │ │
+│  │                                                                      │ │
+│  │  The router filter MUST be the last HTTP filter (terminal).          │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Decode vs Encode execution model**: HTTP filters implement two callback paths. During the **decode** (request) phase, filters execute in the order they appear in the chain. During the **encode** (response) phase, filters execute in **reverse** order. Any filter can stop the chain -- for example, the RBAC filter can return a 403 during decode and skip all downstream filters, including the router. The router filter initiates the upstream connection and is always last in the decode path.
+
+#### Built-in HTTP Filters Used by Istio
+
+| Filter | Envoy Name | Purpose | Istio CRD Mapping |
+|--------|-----------|---------|-------------------|
+| **Router** | `envoy.filters.http.router` | Routes request to upstream cluster based on RDS. Terminal filter. | VirtualService routes |
+| **RBAC** | `envoy.filters.http.rbac` | Evaluates allow/deny rules based on source, path, headers, JWT claims | AuthorizationPolicy |
+| **Fault Injection** | `envoy.filters.http.fault` | Injects delays or aborts (HTTP errors) for chaos testing | VirtualService `fault` |
+| **ext_authz** | `envoy.filters.http.ext_authz` | Delegates authz decision to external gRPC/HTTP service | AuthorizationPolicy (CUSTOM action) |
+| **CORS** | `envoy.filters.http.cors` | Handles CORS preflight and response headers | VirtualService `corsPolicy` |
+| **Lua** | `envoy.filters.http.lua` | Inline Lua scripting for custom request/response manipulation | EnvoyFilter |
+| **Wasm** | `envoy.filters.http.wasm` | Runs WebAssembly plugins for custom logic | WasmPlugin CRD |
+| **Rate Limit** | `envoy.filters.http.ratelimit` | External rate limit service integration | EnvoyFilter (or Istio rate limit API) |
+| **Compressor** | `envoy.filters.http.compressor` | Response body compression (gzip, brotli, zstd) | EnvoyFilter |
+| **JWT Authentication** | `envoy.filters.http.jwt_authn` | Validates JWT tokens against JWKS endpoints | RequestAuthentication |
+| **gRPC Stats** | `envoy.filters.http.grpc_stats` | Emits gRPC-specific metrics (request/response message counts) | Automatic for gRPC traffic |
+
+### Connection Pooling
+
+Envoy manages upstream connection pools on a per-cluster, per-worker-thread basis. The pooling behavior differs significantly between HTTP/1.1 and HTTP/2:
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│              CONNECTION POOL ARCHITECTURE                           │
+│                                                                    │
+│  Worker Thread 0                  Worker Thread 1                  │
+│  ┌────────────────────────┐      ┌────────────────────────┐      │
+│  │  Cluster: reviews:8080  │      │  Cluster: reviews:8080  │      │
+│  │                          │      │                          │      │
+│  │  HTTP/1.1 pool:          │      │  HTTP/1.1 pool:          │      │
+│  │  ┌────┐ ┌────┐ ┌────┐  │      │  ┌────┐ ┌────┐         │      │
+│  │  │conn│ │conn│ │conn│  │      │  │conn│ │conn│         │      │
+│  │  │ 1  │ │ 2  │ │ 3  │  │      │  │ 1  │ │ 2  │         │      │
+│  │  └────┘ └────┘ └────┘  │      │  └────┘ └────┘         │      │
+│  │  (1 request per conn)   │      │  (1 request per conn)   │      │
+│  │                          │      │                          │      │
+│  │  HTTP/2 pool:            │      │  HTTP/2 pool:            │      │
+│  │  ┌────────────────────┐ │      │  ┌────────────────────┐ │      │
+│  │  │ conn 1             │ │      │  │ conn 1             │ │      │
+│  │  │ ├─ stream 1        │ │      │  │ ├─ stream 1        │ │      │
+│  │  │ ├─ stream 2        │ │      │  │ ├─ stream 2        │ │      │
+│  │  │ ├─ stream 3        │ │      │  │ └─ stream 3        │ │      │
+│  │  │ └─ stream 4        │ │      │  └────────────────────┘ │      │
+│  │  └────────────────────┘ │      │  (many requests over 1  │      │
+│  │  (multiplexed streams)  │      │   connection)            │      │
+│  └────────────────────────┘      └────────────────────────┘      │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+| Protocol | Pooling Behavior | Concurrency |
+|----------|-----------------|-------------|
+| **HTTP/1.1** | One request at a time per connection. Envoy opens multiple connections to the same endpoint to achieve parallelism. Connections are kept alive and reused for subsequent requests. | Controlled by `maxConnectionsPerEndpoint` (circuit breaker `max_connections`) |
+| **HTTP/2** | Multiple concurrent streams (requests) multiplexed over a single TCP connection per worker per endpoint. Envoy typically opens just one connection per worker per upstream host. | Controlled by `max_concurrent_streams` (default 2147483647 -- practically unlimited) and `max_requests` circuit breaker |
+
+Connection pools are **not shared across worker threads**. Each worker independently manages its own pools. This means total connections to a single upstream host equals `connections_per_worker * num_workers`.
+
+**Circuit breaker integration**: Connection pools are bounded by the circuit breaker thresholds configured via DestinationRule's `connectionPool` settings. When thresholds are hit (e.g., `maxConnections`, `maxPendingRequests`, `maxRequestsPerConnection`), Envoy immediately returns a `503` with the flag `UO` (upstream overflow) rather than queueing the request.
+
+### Health Checking
+
+Envoy supports two complementary mechanisms for determining endpoint health:
+
+#### Active Health Checking
+
+Envoy periodically sends probe requests to each upstream endpoint and marks unhealthy endpoints as unavailable. This is configured per-cluster and operates independently of Kubernetes liveness/readiness probes.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `interval` | Time between health check attempts | 5s (Istio default varies) |
+| `timeout` | Time to wait for a health check response | 1s |
+| `unhealthy_threshold` | Consecutive failures before marking unhealthy | 2 |
+| `healthy_threshold` | Consecutive successes before marking healthy again | 1 |
+
+Health check types: HTTP (send GET to a path, check status code), TCP (attempt connection), gRPC (use grpc.health.v1.Health service).
+
+> **Note:** In Istio, active health checking is **not enabled by default** for sidecar proxies. Istio relies on Kubernetes readiness probes to remove unready pods from Endpoints, which then propagates to Envoy via EDS. Active health checks can be configured via DestinationRule's `outlierDetection` or via EnvoyFilter for advanced cases. The Istio Gateway deployments are more likely to use active health checks.
+
+#### Passive Health Checking (Outlier Detection)
+
+Outlier detection monitors real traffic responses and ejects endpoints that show signs of failure -- no extra probe traffic needed. This is configured via `DestinationRule.trafficPolicy.outlierDetection` and maps directly to Envoy's `outlier_detection` cluster config.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   OUTLIER DETECTION FLOW                       │
+│                                                               │
+│  Request to upstream endpoint                                 │
+│         │                                                     │
+│         ▼                                                     │
+│  Response received (or connection error / timeout)            │
+│         │                                                     │
+│         ▼                                                     │
+│  Envoy tracks per-endpoint:                                   │
+│  - consecutive 5xx count                                      │
+│  - consecutive gateway errors (502, 503, 504)                 │
+│  - consecutive local-origin failures (connect timeout, reset) │
+│  - success rate (over a sliding window)                       │
+│         │                                                     │
+│         ▼                                                     │
+│  Threshold exceeded?                                          │
+│    ├── No  → continue routing to this endpoint                │
+│    └── Yes → EJECT endpoint for `baseEjectionTime`            │
+│              (each subsequent ejection doubles the duration)   │
+│              Ejected endpoint receives no traffic              │
+│         │                                                     │
+│         ▼                                                     │
+│  After ejection period: endpoint re-enters the pool           │
+│  Next failure → ejected for 2x the base time, etc.           │
+│                                                               │
+│  Safety valve: maxEjectionPercent (default 10%)               │
+│  Never eject more than this % of the cluster at once          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+```yaml
+# DestinationRule with outlier detection
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: reviews-outlier
+spec:
+  host: reviews.default.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutive5xxErrors: 3        # eject after 3 consecutive 5xx
+      interval: 10s                  # check window
+      baseEjectionTime: 30s          # first ejection lasts 30s
+      maxEjectionPercent: 50         # allow ejecting up to 50% of endpoints
+```
+
+**Key difference from Kubernetes probes**: Kubernetes liveness/readiness probes determine whether a pod should be restarted or removed from Service endpoints globally. Envoy outlier detection is **per-proxy** -- one Envoy might eject an endpoint that other Envoys still consider healthy, because the failure might be path-dependent (e.g., network partition between specific nodes).
+
+### Access Logging
+
+Envoy access logs record per-request metadata for debugging and auditing. In Istio, access logging is configured globally via MeshConfig or per-workload via the Telemetry API.
+
+**Enabling access logs globally** (via MeshConfig):
+
+```yaml
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  meshConfig:
+    accessLogFile: /dev/stdout            # file-based (logs to container stdout)
+    accessLogEncoding: JSON               # TEXT or JSON
+    accessLogFormat: ""                    # empty = default format
+```
+
+**Default access log format** (TEXT mode):
+
+```
+[%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+%RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% %CONNECTION_TERMINATION_DETAILS%
+"%UPSTREAM_TRANSPORT_FAILURE_REASON%" %BYTES_RECEIVED% %BYTES_SENT%
+%DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%
+"%REQ(X-FORWARDED-FOR)%" "%REQ(USER-AGENT)%"
+"%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%"
+%UPSTREAM_CLUSTER% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS%
+%DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%
+```
+
+Key response flags to watch for in logs:
+
+| Flag | Meaning |
+|------|---------|
+| `UH` | No healthy upstream hosts |
+| `UF` | Upstream connection failure |
+| `UO` | Upstream overflow (circuit breaker tripped) |
+| `NR` | No route configured |
+| `URX` | Upstream retry limit exceeded |
+| `DC` | Downstream connection termination |
+| `RL` | Rate limited |
+| `UAEX` | Unauthorized (ext_authz denied) |
+| `RLSE` | Rate limit service error |
+
+**gRPC Access Log Service (ALS)**: Instead of (or in addition to) file-based logging, Envoy can stream access logs to a remote gRPC service. This enables centralized log collection without relying on a sidecar log shipper:
+
+```
+Envoy → gRPC stream → Access Log Service (ALS) → Storage backend
+                        (e.g., OpenTelemetry       (Elasticsearch,
+                         Collector, custom)          BigQuery, etc.)
+```
+
+Configure via MeshConfig:
+
+```yaml
+meshConfig:
+  accessLogFile: ""                     # disable file logging
+  defaultConfig:
+    envoyAccessLogService:
+      address: als-collector.istio-system:9090
+```
+
+---
+
+## Observability
+
+Istio provides comprehensive observability out of the box by leveraging Envoy's built-in telemetry capabilities. Every request passing through the mesh is automatically instrumented -- no application code changes required for metrics and basic tracing.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    OBSERVABILITY DATA FLOW                                    │
+│                                                                              │
+│  ┌─── Pod ──────────────────────┐                                           │
+│  │  ┌──────┐     ┌────────────┐ │                                           │
+│  │  │ App  │◄───►│ Envoy      │ │                                           │
+│  │  │      │     │ (istio-    │ │                                           │
+│  │  │      │     │  proxy)    │ │                                           │
+│  │  └──────┘     └──┬──┬──┬──┘ │                                           │
+│  └──────────────────┼──┼──┼────┘                                           │
+│                     │  │  │                                                  │
+│          ┌──────────┘  │  └──────────┐                                      │
+│          │             │             │                                       │
+│          ▼             ▼             ▼                                       │
+│  ┌──────────────┐ ┌────────────┐ ┌──────────────────┐                      │
+│  │  :15090      │ │ Trace      │ │ Access Logs       │                      │
+│  │  /stats/     │ │ Spans      │ │ (stdout or        │                      │
+│  │  prometheus  │ │ (Zipkin/   │ │  gRPC ALS)        │                      │
+│  │              │ │  OTel fmt) │ │                    │                      │
+│  └──────┬───────┘ └─────┬──────┘ └────────┬──────────┘                     │
+│         │               │                 │                                  │
+│    Scrape (pull)   Push (HTTP/gRPC)   Collect (file/gRPC)                   │
+│         │               │                 │                                  │
+│         ▼               ▼                 ▼                                  │
+│  ┌──────────────┐ ┌────────────────┐ ┌──────────────────┐                  │
+│  │  Prometheus   │ │  Jaeger /       │ │  Loki /           │                 │
+│  │              │ │  Zipkin /       │ │  Elasticsearch /  │                  │
+│  │  (scrapes    │ │  Tempo /        │ │  OpenTelemetry    │                 │
+│  │   all Envoys │ │  OpenTelemetry  │ │  Collector        │                  │
+│  │   on :15090) │ │  Collector      │ │                    │                 │
+│  └──────┬───────┘ └────────┬───────┘ └──────────────────┘                  │
+│         │                  │                                                 │
+│         ▼                  ▼                                                 │
+│  ┌──────────────┐ ┌────────────────┐                                       │
+│  │  Grafana      │ │  Jaeger UI /    │                                      │
+│  │  (dashboards) │ │  Tempo UI       │                                      │
+│  └──────────────┘ └────────────────┘                                       │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────┐           │
+│  │  Kiali  (scrapes Prometheus + queries traces)                 │           │
+│  │  - Service topology graph                                      │          │
+│  │  - Traffic flow visualization                                  │          │
+│  │  - Istio config validation                                     │          │
+│  └──────────────────────────────────────────────────────────────┘           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Metrics
+
+Envoy generates a rich set of metrics for every request it proxies. Istio adds a set of **standard metrics** with consistent label dimensions that enable service-level dashboards.
+
+#### Standard Istio Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `istio_requests_total` | Counter | Total requests. Labels: `source_workload`, `destination_workload`, `source_namespace`, `destination_namespace`, `request_protocol`, `response_code`, `connection_security_policy`, `response_flags` |
+| `istio_request_duration_milliseconds` | Histogram | Request duration in ms (buckets). Same labels as above. |
+| `istio_request_bytes` | Histogram | Request body size in bytes. |
+| `istio_response_bytes` | Histogram | Response body size in bytes. |
+| `istio_tcp_sent_bytes_total` | Counter | Total bytes sent during TCP connections. |
+| `istio_tcp_received_bytes_total` | Counter | Total bytes received during TCP connections. |
+| `istio_tcp_connections_opened_total` | Counter | Total TCP connections opened. |
+| `istio_tcp_connections_closed_total` | Counter | Total TCP connections closed. |
+
+These metrics are generated by the **Istio stats filter** (`istio.stats`), a Wasm filter compiled into Envoy. It intercepts request/response metadata and emits the standard metrics with the correct label dimensions.
+
+#### Metrics Collection Flow
+
+```
+  Envoy sidecar (in every pod)
+       │
+       │  Exposes /stats/prometheus on port 15090
+       │  (merged with Istio standard metrics)
+       │
+       ▼
+  Prometheus scrapes port 15090
+       │
+       │  Typically via PodMonitor or ServiceMonitor CRDs
+       │  (if using prometheus-operator) or via
+       │  annotation-based discovery:
+       │    prometheus.io/scrape: "true"
+       │    prometheus.io/port: "15090"
+       │    prometheus.io/path: "/stats/prometheus"
+       │
+       ▼
+  Grafana dashboards
+       │
+       │  Istio ships standard dashboards:
+       │  - Mesh Dashboard (global overview)
+       │  - Service Dashboard (per-service metrics)
+       │  - Workload Dashboard (per-workload detail)
+       │  - Performance Dashboard (control plane metrics)
+       │  - Control Plane Dashboard (istiod health)
+```
+
+> **Note:** Port 15020 on `pilot-agent` serves a merged metrics endpoint that combines Envoy stats (from 15090) with pilot-agent's own metrics and application metrics (if configured via `prometheus.io/` annotations on the pod). This is useful when you want a single scrape target per pod.
+
+#### Customizing Metrics via Telemetry API
+
+The Istio Telemetry API (discussed in the Extensibility section) allows per-workload metric configuration -- adding custom dimensions, disabling specific metrics, or overriding tag values:
+
+```yaml
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: custom-metrics
+  namespace: my-app
+spec:
+  metrics:
+  - providers:
+    - name: prometheus
+    overrides:
+    - match:
+        metric: REQUEST_COUNT
+        mode: CLIENT_AND_SERVER
+      tagOverrides:
+        request_host:
+          operation: UPSERT
+          value: "request.host"    # add request_host label
+    - match:
+        metric: REQUEST_DURATION
+        mode: SERVER
+      disabled: true               # disable duration histogram for this workload
+```
+
+### Distributed Tracing
+
+Istio enables distributed tracing across microservices by having each Envoy sidecar generate a **span** for every request it handles. These spans, linked by trace context headers, form a complete trace of a request's path through the mesh.
+
+#### How It Works
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     DISTRIBUTED TRACING FLOW                              │
+│                                                                           │
+│  Client                                                                   │
+│    │                                                                      │
+│    │  GET /api/product/123                                                │
+│    │  (no trace headers)                                                  │
+│    ▼                                                                      │
+│  ┌────────────────────┐                                                  │
+│  │ Envoy A (ingress)  │ ◄── Generates root span                         │
+│  │                     │     Creates: x-request-id, x-b3-traceid,        │
+│  │                     │     x-b3-spanid, x-b3-sampled                   │
+│  └─────────┬──────────┘                                                  │
+│            │  Span A: "inbound|gateway → product-svc"                    │
+│            ▼                                                              │
+│  ┌────────────────────┐                                                  │
+│  │ App: product-svc   │ ◄── App MUST propagate trace headers             │
+│  │                     │     when making outbound calls                   │
+│  │  calls:             │                                                  │
+│  │  - reviews-svc      │                                                  │
+│  │  - ratings-svc      │                                                  │
+│  └──┬───────────┬──────┘                                                 │
+│     │           │                                                         │
+│     ▼           ▼                                                         │
+│  ┌────────┐  ┌────────┐                                                  │
+│  │Envoy B │  │Envoy C │ ◄── Each generates a child span                 │
+│  │        │  │        │     linked to the same trace ID                  │
+│  └────┬───┘  └────┬───┘                                                  │
+│       │           │                                                       │
+│       ▼           ▼                                                       │
+│  ┌────────┐  ┌────────┐                                                  │
+│  │reviews │  │ratings │                                                  │
+│  │svc     │  │svc     │                                                  │
+│  └────────┘  └────────┘                                                  │
+│                                                                           │
+│  Result in Jaeger/Zipkin:                                                │
+│  ┌─ Trace: abc123 ──────────────────────────────────────────────────┐    │
+│  │                                                                    │    │
+│  │  ├── Span A: gateway → product-svc       [0ms────────200ms]      │    │
+│  │  │   ├── Span B: product → reviews-svc   [10ms──────150ms]      │    │
+│  │  │   └── Span C: product → ratings-svc   [20ms────100ms]        │    │
+│  │                                                                    │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Critical Caveat: Applications MUST Propagate Trace Headers
+
+Envoy generates spans automatically, but it cannot correlate inbound and outbound spans within the same application. The application **must** copy the following headers from incoming requests to all outgoing requests:
+
+| Header | Format | Purpose |
+|--------|--------|---------|
+| `x-request-id` | UUID | Envoy-generated unique request ID |
+| `x-b3-traceid` | 128-bit hex | Zipkin/B3 trace identifier |
+| `x-b3-spanid` | 64-bit hex | Zipkin/B3 span identifier |
+| `x-b3-parentspanid` | 64-bit hex | Parent span ID |
+| `x-b3-sampled` | `0` or `1` | Whether the trace is sampled |
+| `traceparent` | W3C Trace Context | W3C standard trace context (used with OpenTelemetry) |
+| `tracestate` | W3C Trace Context | Vendor-specific trace data |
+
+If the application does not propagate these headers, each Envoy generates an independent trace with no parent-child relationship. Multi-hop traces appear as disconnected, single-span traces in Jaeger.
+
+Most HTTP frameworks have middleware/interceptors to propagate these automatically (e.g., Spring Sleuth, Go's `ochttp`, Python's `opentelemetry-instrumentation`).
+
+#### Configuring Tracing
+
+Tracing is configured via the Telemetry API or MeshConfig:
+
+```yaml
+# Via Telemetry API (per-namespace or per-workload)
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: tracing-config
+  namespace: istio-system          # mesh-wide if in istio-system
+spec:
+  tracing:
+  - providers:
+    - name: zipkin                 # or "opentelemetry"
+    randomSamplingPercentage: 1.0  # sample 1% of requests
+    customTags:
+      environment:
+        literal:
+          value: "production"
+```
+
+Supported tracing backends: **Zipkin**, **Jaeger** (with Zipkin-compatible collector), **OpenTelemetry Collector** (recommended for new deployments), **Datadog**, **Lightstep/ServiceNow**.
+
+### Kiali
+
+Kiali is the dedicated observability console for Istio. It provides a web UI for understanding the structure and health of the service mesh.
+
+Core capabilities:
+
+- **Topology graph**: Real-time visualization of service-to-service traffic flow, with edges showing request rates, error rates, and response times. Can be viewed at namespace, workload, app, or service granularity.
+- **Traffic animation**: Animated dots flowing along edges showing actual request volume and direction.
+- **Istio config validation**: Validates VirtualService, DestinationRule, AuthorizationPolicy, and other Istio CRDs. Flags issues like missing DestinationRules for subsets referenced in VirtualServices, conflicting mTLS settings, or unreachable routes.
+- **Health indicators**: Color-coded health status for services, workloads, and apps based on error rates and request success rates.
+- **Distributed tracing integration**: Embeds Jaeger/Tempo trace views directly in the Kiali UI for correlated troubleshooting.
+- **Wizard actions**: Can generate Istio config (e.g., traffic routing, fault injection) directly from the UI.
+
+Kiali pulls data from Prometheus (for metrics and graph generation), the Kubernetes API (for workload/service info), and optionally Jaeger/Tempo (for traces).
+
+---
+
+## Security (Beyond mTLS)
+
+The earlier section covered mTLS and PeerAuthentication. This section covers the remaining security features: request-level authentication (JWT validation), fine-grained authorization policies (RBAC), and external authorization delegation.
+
+### Security Evaluation Flow
+
+Every inbound request to a meshed workload passes through the following security checks inside Envoy, in this exact order:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│              SECURITY EVALUATION ORDER FOR INCOMING REQUEST               │
+│                                                                           │
+│  Incoming connection                                                      │
+│         │                                                                 │
+│         ▼                                                                 │
+│  ┌─────────────────────┐                                                 │
+│  │  1. mTLS Handshake   │  PeerAuthentication policy                     │
+│  │                       │  - STRICT: require valid client cert           │
+│  │  Validate peer cert   │  - PERMISSIVE: accept with or without         │
+│  │  Extract SPIFFE ID    │  - DISABLE: no TLS                            │
+│  │  from SAN             │                                                │
+│  └──────────┬────────────┘                                               │
+│             │  Peer identity established (or plaintext if PERMISSIVE)    │
+│             ▼                                                             │
+│  ┌─────────────────────────┐                                             │
+│  │  2. RequestAuthentication│  JWT validation                            │
+│  │                           │  - Fetch JWKS from issuer                 │
+│  │  Validate JWT token       │  - Verify signature, expiry, audience     │
+│  │  (if present in request)  │  - Extract claims to filter metadata      │
+│  │                           │                                            │
+│  │  Missing token?           │                                            │
+│  │  → Allowed (unless        │                                            │
+│  │    AuthorizationPolicy    │                                            │
+│  │    requires JWT claims)   │                                            │
+│  └──────────┬────────────────┘                                           │
+│             │  JWT claims available (if token was present and valid)     │
+│             ▼                                                             │
+│  ┌───────────────────────────────────────────────────────────────────┐   │
+│  │  3. AuthorizationPolicy evaluation                                 │   │
+│  │                                                                     │   │
+│  │  Three actions, evaluated in strict order:                          │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────┐                                               │   │
+│  │  │  a. CUSTOM       │ → Calls ext_authz service                    │   │
+│  │  │  (if configured) │   If DENY → 403, stop                        │   │
+│  │  │                   │   If ALLOW → continue                        │   │
+│  │  └────────┬──────────┘                                             │   │
+│  │           ▼                                                         │   │
+│  │  ┌─────────────────┐                                               │   │
+│  │  │  b. DENY         │ → If ANY deny rule matches → 403, stop       │   │
+│  │  │  (if configured) │   If no deny rule matches → continue         │   │
+│  │  └────────┬──────────┘                                             │   │
+│  │           ▼                                                         │   │
+│  │  ┌─────────────────┐                                               │   │
+│  │  │  c. ALLOW        │ → If ANY allow rule matches → allow          │   │
+│  │  │  (if configured) │   If NO allow rule matches → 403, deny       │   │
+│  │  │                   │                                              │   │
+│  │  │  If NO ALLOW      │                                              │   │
+│  │  │  policies exist   │ → Allow all (implicit allow)                │   │
+│  │  └─────────────────┘                                               │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│             │                                                             │
+│             ▼                                                             │
+│  Request forwarded to application                                        │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+The evaluation order is **CUSTOM -> DENY -> ALLOW**. This is critical to understand:
+
+1. **CUSTOM** policies are evaluated first. If any CUSTOM policy denies the request, evaluation stops immediately.
+2. **DENY** policies are evaluated next. If any DENY rule matches, the request is denied regardless of ALLOW policies.
+3. **ALLOW** policies are evaluated last. If ALLOW policies exist, at least one must match for the request to proceed. If no ALLOW policies exist at all, the request is implicitly allowed (after passing DENY checks).
+
+### AuthorizationPolicy
+
+AuthorizationPolicy is the RBAC mechanism for Istio. It controls which workloads can communicate with each other and under what conditions. At the Envoy level, AuthorizationPolicy translates to the `envoy.filters.http.rbac` and `envoy.filters.network.rbac` filters.
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: <name>
+  namespace: <namespace>       # applies to workloads in this namespace
+spec:
+  selector:                    # optional: target specific workloads
+    matchLabels:
+      app: my-service
+  action: ALLOW | DENY | CUSTOM   # default: ALLOW
+  provider:                    # only for action: CUSTOM
+    name: my-ext-authz
+  rules:
+  - from:                      # source conditions (AND with 'to' and 'when')
+    - source:
+        principals: [...]      # SPIFFE identity
+        namespaces: [...]
+        ipBlocks: [...]
+    to:                        # destination conditions
+    - operation:
+        methods: [...]
+        paths: [...]
+        ports: [...]
+    when:                      # additional conditions
+    - key: request.headers[x-custom-token]
+      values: ["valid-token"]
+```
+
+#### Example: Deny-First Pattern (Recommended)
+
+The deny-first pattern provides a deny-by-default posture:
+
+```yaml
+# 1. Deny all traffic by default (mesh-wide in istio-system)
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: istio-system      # mesh-wide scope
+spec:
+  {}                           # empty spec with no rules = deny everything
+
+---
+# 2. Allow specific traffic
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-frontend-to-api
+  namespace: backend
+spec:
+  selector:
+    matchLabels:
+      app: api-server
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/frontend/sa/webapp"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/api/*"]
+```
+
+> **Note:** An empty `spec: {}` with no `rules` means "match all traffic but have no allow rules." Since ALLOW policies exist (with zero matching rules), all traffic is denied. This is the standard deny-by-default pattern.
+
+#### Example: Source-Based, Path-Based, and Header-Based Rules
+
+```yaml
+# Allow only requests from the "monitoring" namespace to /metrics
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-metrics-scrape
+  namespace: my-app
+spec:
+  selector:
+    matchLabels:
+      app: my-service
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        namespaces: ["monitoring"]
+    to:
+    - operation:
+        paths: ["/metrics", "/stats/prometheus"]
+        methods: ["GET"]
+
+---
+# Deny requests with a specific header (e.g., block internal testing header in prod)
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-test-header
+  namespace: production
+spec:
+  action: DENY
+  rules:
+  - when:
+    - key: request.headers[x-test-request]
+      values: ["true"]
+```
+
+#### Example: JWT-Claim-Based Authorization
+
+```yaml
+# Only allow requests with a valid JWT that has role=admin
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-admin-role
+  namespace: admin-portal
+spec:
+  selector:
+    matchLabels:
+      app: admin-dashboard
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        requestPrincipals: ["https://auth.example.com/*"]  # issuer must match
+    when:
+    - key: request.auth.claims[role]
+      values: ["admin"]
+    to:
+    - operation:
+        methods: ["GET", "POST", "PUT", "DELETE"]
+```
+
+The `request.auth.claims[...]` fields are populated by the `RequestAuthentication` resource's JWT validation (covered below). Without a corresponding `RequestAuthentication`, no JWT validation occurs and these claim-based rules never match.
+
+### RequestAuthentication (JWT Validation)
+
+RequestAuthentication configures Envoy to validate JWT tokens on incoming requests. It maps to the `envoy.filters.http.jwt_authn` filter in Envoy.
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-auth
+  namespace: my-app
+spec:
+  selector:
+    matchLabels:
+      app: api-server
+  jwtRules:
+  - issuer: "https://auth.example.com"
+    jwksUri: "https://auth.example.com/.well-known/jwks.json"
+    audiences:                                 # optional: restrict accepted audiences
+    - "api.example.com"
+    forwardOriginalToken: true                 # pass validated JWT to upstream app
+    fromHeaders:                               # where to find the token
+    - name: Authorization
+      prefix: "Bearer "
+    fromParams:                                # also check query param
+    - "access_token"
+    outputPayloadToHeader: "x-jwt-payload"     # optional: forward decoded payload
+```
+
+How JWT validation works at the Envoy filter level:
+
+```
+  Request arrives with Authorization: Bearer <token>
+         │
+         ▼
+  jwt_authn filter extracts token from header/param
+         │
+         ▼
+  Fetch JWKS from issuer's jwksUri
+  (cached in Envoy, refreshed periodically)
+         │
+         ▼
+  Validate JWT:
+  - Signature verification (RS256, ES256, etc.)
+  - Expiry check (exp claim)
+  - Issuer match (iss claim)
+  - Audience match (aud claim, if configured)
+         │
+         ├── Invalid → 401 Unauthorized
+         │
+         └── Valid → Extract claims to Envoy filter metadata
+                     (available to downstream filters like RBAC)
+```
+
+**Key behavior**: If a request has **no JWT token at all**, `RequestAuthentication` does **not reject it**. It only rejects requests with **invalid** tokens. To require a token, you must pair it with an `AuthorizationPolicy` that demands specific JWT claims (e.g., `requestPrincipals` must be non-empty).
+
+This two-resource pattern is intentional -- it separates authentication (is the token valid?) from authorization (is this identity allowed?).
+
+#### Integration with External Identity Providers
+
+RequestAuthentication works with any OIDC-compliant provider that publishes a JWKS endpoint:
+
+| Provider | jwksUri Example |
+|----------|----------------|
+| Auth0 | `https://YOUR_DOMAIN.auth0.com/.well-known/jwks.json` |
+| Keycloak | `https://keycloak.example.com/realms/myrealm/protocol/openid-connect/certs` |
+| Google | `https://www.googleapis.com/oauth2/v3/certs` |
+| Azure AD | `https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys` |
+| Okta | `https://YOUR_DOMAIN.okta.com/oauth2/default/v1/keys` |
+
+### External Authorization (ext_authz)
+
+For authorization logic too complex for static RBAC rules (e.g., checking a database, evaluating OPA policies, calling a custom decision service), Istio supports delegating authorization to an external service via the `ext_authz` Envoy filter.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    EXT_AUTHZ FLOW                                        │
+│                                                                          │
+│  Request arrives at Envoy                                                │
+│         │                                                                │
+│         ▼                                                                │
+│  ext_authz filter activated                                              │
+│  (before RBAC filter in the chain)                                       │
+│         │                                                                │
+│         │  gRPC call (or HTTP call) to external service:                 │
+│         │  - sends: source IP, headers, path, method,                    │
+│         │    SNI, peer cert, request body (if configured)                │
+│         ▼                                                                │
+│  ┌───────────────────────────────────────┐                              │
+│  │  External Authz Service               │                              │
+│  │  (e.g., OPA, custom Go/Python svc)    │                              │
+│  │                                        │                              │
+│  │  Evaluates policy:                     │                              │
+│  │  - Query OPA Rego policies             │                              │
+│  │  - Check database / Redis              │                              │
+│  │  - Multi-tenant authorization          │                              │
+│  │  - Rate limiting with custom logic     │                              │
+│  │                                        │                              │
+│  │  Returns:                              │                              │
+│  │  - OK (200) → request continues        │                              │
+│  │  - Denied (403) → request rejected     │                              │
+│  │  - Can add/remove headers              │                              │
+│  └──────────────────┬────────────────────┘                              │
+│                     │                                                    │
+│                     ▼                                                    │
+│  Envoy receives decision                                                │
+│  ├── ALLOW → proceed to RBAC → ALLOW evaluation → route to upstream     │
+│  └── DENY  → return 403 to client immediately                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Configuring ext_authz in Istio:
+
+```yaml
+# 1. Register the ext_authz provider in MeshConfig
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  meshConfig:
+    extensionProviders:
+    - name: "opa-authz"
+      envoyExtAuthzGrpc:
+        service: "opa.opa-system.svc.cluster.local"
+        port: 9191
+        # optional: include request body in authz check
+        includeRequestBodyInCheck:
+          maxRequestBytes: 4096
+          allowPartialMessage: true
+
+---
+# 2. AuthorizationPolicy with CUSTOM action
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: opa-authz
+  namespace: my-app
+spec:
+  selector:
+    matchLabels:
+      app: api-server
+  action: CUSTOM
+  provider:
+    name: opa-authz                # references the meshConfig provider
+  rules:
+  - to:
+    - operation:
+        paths: ["/api/*"]          # only trigger ext_authz for /api/ paths
+```
+
+The ext_authz service must implement either the Envoy `envoy.service.auth.v3.Authorization` gRPC interface or a simple HTTP check interface (Envoy sends the request headers as-is to the HTTP endpoint).
+
+---
+
+## Extensibility
+
+Istio exposes several mechanisms for extending Envoy's behavior beyond what the built-in Istio CRDs offer. These range from safe, supported APIs (WasmPlugin, Telemetry) to low-level escape hatches (EnvoyFilter).
+
+### Wasm (WebAssembly) Plugins
+
+WebAssembly allows extending Envoy with custom filter logic written in Go, Rust, C++, or AssemblyScript, compiled to a `.wasm` binary. Envoy loads and executes the Wasm module in a sandboxed VM (V8 or Wasmtime) inside the proxy process.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    WASM PLUGIN LIFECYCLE                                   │
+│                                                                           │
+│  Developer writes plugin                                                  │
+│  (Go with proxy-wasm-go-sdk,                                             │
+│   Rust with proxy-wasm-rust-sdk)                                         │
+│         │                                                                 │
+│         ▼                                                                 │
+│  Compile to .wasm binary                                                 │
+│         │                                                                 │
+│         ▼                                                                 │
+│  Push to OCI registry                                                    │
+│  (e.g., ghcr.io/myorg/my-plugin:v1)                                     │
+│         │                                                                 │
+│         ▼                                                                 │
+│  Create WasmPlugin CRD                                                   │
+│         │                                                                 │
+│         ▼                                                                 │
+│  istiod translates to Envoy Wasm filter config                           │
+│  pushes via LDS/xDS                                                      │
+│         │                                                                 │
+│         ▼                                                                 │
+│  Envoy downloads .wasm from OCI registry                                 │
+│  (via istio-agent, cached locally)                                       │
+│         │                                                                 │
+│         ▼                                                                 │
+│  Envoy loads .wasm into V8/Wasmtime sandbox                              │
+│  Inserts filter into HTTP filter chain                                   │
+│         │                                                                 │
+│         ▼                                                                 │
+│  Plugin executes on every matching request                               │
+│  (decodeHeaders, decodeBody, encodeHeaders, encodeBody callbacks)        │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+```yaml
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: custom-header-plugin
+  namespace: my-app
+spec:
+  selector:
+    matchLabels:
+      app: my-service
+  url: oci://ghcr.io/myorg/header-plugin:v1.2.0   # OCI image with .wasm
+  phase: AUTHN                   # where in the filter chain to insert
+                                 # AUTHN (before authn), AUTHZ (before authz),
+                                 # STATS (before stats), UNSPECIFIED (before router)
+  pluginConfig:                  # plugin-specific config (passed as JSON)
+    header_name: "x-custom-id"
+    header_value: "injected-by-wasm"
+  imagePullPolicy: IfNotPresent  # Always, IfNotPresent, Never
+  match:                         # optional: only apply to specific traffic
+  - mode: SERVER                 # SERVER (inbound), CLIENT (outbound), or UNDEFINED (both)
+    ports:
+    - number: 8080
+```
+
+**Performance characteristics**: Wasm plugins add latency compared to native C++ filters. Typical overhead is 10-50 microseconds per filter invocation for simple logic (header reads/writes). Computationally heavy plugins (parsing large request bodies, regex evaluation) can add significantly more. For extremely latency-sensitive paths, native C++ filters are preferred, but Wasm provides a safe, portable alternative that does not require recompiling Envoy.
+
+**Use cases**: Custom metrics emission, header injection/transformation, request routing based on custom logic, token exchange/transformation, request body validation, A/B testing cookie assignment.
+
+### EnvoyFilter
+
+EnvoyFilter is a low-level CRD that directly patches the Envoy configuration generated by Istio. It is an **escape hatch** for configuring Envoy features not exposed through Istio's higher-level CRDs (VirtualService, DestinationRule, AuthorizationPolicy, etc.).
+
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: add-lua-filter
+  namespace: my-app
+spec:
+  workloadSelector:
+    labels:
+      app: my-service
+  configPatches:
+  - applyTo: HTTP_FILTER                    # what to patch
+    match:
+      context: SIDECAR_INBOUND              # SIDECAR_INBOUND, SIDECAR_OUTBOUND,
+                                            # GATEWAY, ANY
+      listener:
+        filterChain:
+          filter:
+            name: envoy.filters.network.http_connection_manager
+            subFilter:
+              name: envoy.filters.http.router    # insert before router
+    patch:
+      operation: INSERT_BEFORE               # ADD, REMOVE, MERGE, REPLACE,
+                                             # INSERT_BEFORE, INSERT_AFTER,
+                                             # INSERT_FIRST
+      value:
+        name: envoy.filters.http.lua
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+          inline_code: |
+            function envoy_on_request(request_handle)
+              request_handle:headers():add("x-custom-header", "hello-from-lua")
+            end
+```
+
+Patch operations:
+
+| Operation | Description |
+|-----------|-------------|
+| `ADD` | Add a new resource (listener, cluster, filter) |
+| `REMOVE` | Remove a matched resource |
+| `MERGE` | Deep-merge the patch value into the matched resource |
+| `REPLACE` | Replace the matched resource entirely |
+| `INSERT_BEFORE` | Insert a filter before the matched filter |
+| `INSERT_AFTER` | Insert a filter after the matched filter |
+| `INSERT_FIRST` | Insert a filter at the beginning of the chain |
+
+`applyTo` targets:
+
+| Value | What It Patches |
+|-------|----------------|
+| `LISTENER` | Top-level listener config |
+| `FILTER_CHAIN` | Filter chain within a listener |
+| `NETWORK_FILTER` | Network-level filter in a chain |
+| `HTTP_FILTER` | HTTP filter within HCM |
+| `ROUTE_CONFIGURATION` | RDS route config |
+| `VIRTUAL_HOST` | Virtual host within a route config |
+| `HTTP_ROUTE` | Specific route entry |
+| `CLUSTER` | CDS cluster config |
+| `EXTENSION_CONFIG` | ECDS extension config |
+
+> **Warning:** EnvoyFilter patches are brittle. They reference internal Envoy config structures that can change across Istio versions. An EnvoyFilter that works on Istio 1.20 may silently fail or cause crashes on Istio 1.22 if the generated config structure changed. Always prefer WasmPlugin, Telemetry, or higher-level CRDs when possible. Use EnvoyFilter only as a last resort, and pin your Istio version in CI tests for any EnvoyFilter resources.
+
+### Lua Filters
+
+Lua filters provide lightweight inline scripting for quick customizations without the overhead of compiling and distributing a Wasm binary. They are typically injected via EnvoyFilter (as shown above).
+
+Lua scripts have access to:
+
+- Request/response headers (read and modify)
+- Request/response body (read and modify, with buffering)
+- Dynamic metadata (read and write, for passing data between filters)
+- Logging
+- Making async HTTP calls to upstream clusters
+
+```lua
+-- Example: Add response time header and log slow requests
+function envoy_on_request(request_handle)
+  request_handle:headers():add("x-request-start", tostring(os.clock()))
+end
+
+function envoy_on_response(response_handle)
+  local start = tonumber(response_handle:headers():get("x-request-start"))
+  if start then
+    local duration = os.clock() - start
+    response_handle:headers():add("x-response-time-ms", tostring(duration * 1000))
+    if duration > 1.0 then
+      response_handle:logWarn("Slow request: " .. tostring(duration) .. "s")
+    end
+  end
+end
+```
+
+**Limitation**: Lua filters run in a coroutine per request. They are single-threaded within the worker and must not block. For complex logic, Wasm plugins or ext_authz are preferred.
+
+### Telemetry API
+
+The Telemetry API is Istio's CRD for configuring observability per-workload, per-namespace, or mesh-wide. It provides a declarative way to configure metrics, tracing, and access logging without resorting to EnvoyFilter.
+
+```yaml
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-telemetry
+  namespace: istio-system         # mesh-wide when in istio-system
+spec:
+  # --- Tracing configuration ---
+  tracing:
+  - providers:
+    - name: opentelemetry          # registered in meshConfig.extensionProviders
+    randomSamplingPercentage: 5.0
+    disableSpanReporting: false
+    customTags:
+      cluster_name:
+        environment:
+          name: CLUSTER_NAME
+
+  # --- Metrics configuration ---
+  metrics:
+  - providers:
+    - name: prometheus
+    overrides:
+    - match:
+        metric: ALL_METRICS
+        mode: CLIENT_AND_SERVER
+      tagOverrides:
+        request_method:
+          operation: UPSERT
+          value: "request.method"
+
+  # --- Access log configuration ---
+  accessLogging:
+  - providers:
+    - name: envoy                  # file-based (stdout)
+    filter:
+      expression: "response.code >= 400"  # only log errors
+  - providers:
+    - name: otel-als               # gRPC ALS to OTel Collector
+```
+
+The Telemetry API scoping rules:
+
+- **Mesh-wide**: Telemetry resource in `istio-system` namespace with no `selector`
+- **Namespace-wide**: Telemetry resource in a target namespace with no `selector`
+- **Workload-specific**: Telemetry resource with a `selector.matchLabels`
+- **Inheritance**: Workload > Namespace > Mesh. More specific configs override less specific ones.
+
+---
+
 ## See also
 
 - [[notes/Networking/tls-1.3-handshake|TLS 1.3 Handshake]] -- mTLS in Istio uses TLS under the hood
@@ -1335,6 +2550,23 @@ kubectl exec deploy/my-app -c istio-proxy -- iptables -t nat -S
 - [Istio Debugging (proxy-cmd)](https://istio.io/latest/docs/ops/diagnostic-tools/proxy-cmd/)
 - [Tetrate: iptables Rules in Istio Sidecar Explained](https://tetrate.io/blog/traffic-types-and-iptables-rules-in-istio-sidecar-explained)
 - [Jimmy Song: Sidecar Injection, Traffic Intercepting & Routing](https://jimmysong.io/en/blog/sidecar-injection-iptables-and-traffic-routing/)
+- [Envoy Threading Model (official docs)](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/intro/threading_model)
+- [Envoy Hot Restart (official docs)](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/hot_restart)
+- [Envoy HTTP Filter Chain (official docs)](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/http/http_filters)
+- [Envoy Connection Pooling](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/connection_pooling)
+- [Envoy Outlier Detection](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/outlier)
+- [Istio Observability (official docs)](https://istio.io/latest/docs/concepts/observability/)
+- [Istio Standard Metrics Reference](https://istio.io/latest/docs/reference/config/metrics/)
+- [Istio Distributed Tracing](https://istio.io/latest/docs/tasks/observability/distributed-tracing/)
+- [Istio AuthorizationPolicy Reference](https://istio.io/latest/docs/reference/config/security/authorization-policy/)
+- [Istio RequestAuthentication Reference](https://istio.io/latest/docs/reference/config/security/request_authentication/)
+- [Istio External Authorization](https://istio.io/latest/docs/tasks/security/authorization/authz-custom/)
+- [Istio WasmPlugin Reference](https://istio.io/latest/docs/reference/config/proxy_extensions/wasm-plugin/)
+- [Istio Telemetry API Reference](https://istio.io/latest/docs/reference/config/telemetry/)
+- [Istio EnvoyFilter Reference](https://istio.io/latest/docs/reference/config/networking/envoy-filter/)
+- [Kiali (official site)](https://kiali.io/)
+- [Proxy-Wasm Spec (ABI)](https://github.com/proxy-wasm/spec)
+- [[notes/AuthNZ/OIDC_Oauth|OIDC & OAuth]] -- JWT validation and OIDC fundamentals for RequestAuthentication
 
 ---
 
@@ -1496,3 +2728,233 @@ The key insight is that most services only need L4 security (mTLS + basic authz)
 3. **Fallback to TCP**: If detection times out or fails, the traffic is treated as opaque TCP. No HTTP-level features (retries, header-based routing, HTTP metrics) are available.
 
 The gotcha: if you forget to name your ports correctly, all HTTP traffic is treated as TCP. You get no HTTP metrics, no retries, no header-based routing. The symptom is subtle -- everything works, but mesh features silently don't apply. Always check with `istioctl proxy-config listeners deploy/my-app` to verify the filter chain type for each port.
+
+---
+
+### Q: Explain Envoy's threading model. Why doesn't it use a thread-per-connection approach?
+
+**A:** Envoy uses a multi-threaded, non-blocking event-loop architecture:
+
+```
+                    ┌────────────────┐
+                    │  Main Thread   │
+                    │  - xDS updates │
+                    │  - Admin API   │
+                    │  - Stats flush │
+                    └───────┬────────┘
+                            │ RCU (thread-local snapshots)
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Worker 0 │ │ Worker 1 │ │ Worker N │
+        │ (event   │ │ (event   │ │ (event   │
+        │  loop)   │ │  loop)   │ │  loop)   │
+        │          │ │          │ │          │
+        │ owns:    │ │ owns:    │ │ owns:    │
+        │ - conns  │ │ - conns  │ │ - conns  │
+        │ - pools  │ │ - pools  │ │ - pools  │
+        └──────────┘ └──────────┘ └──────────┘
+```
+
+The **main thread** handles control plane operations (xDS updates, admin API, stats flushing) but never touches data-plane traffic. **Worker threads** each run an independent libevent event loop and own their connections for the entire connection lifetime. The kernel distributes incoming connections across workers using `SO_REUSEPORT`.
+
+A thread-per-connection model would waste memory on idle connections and suffer from context-switching overhead at high connection counts. Envoy's event-loop model can handle thousands of concurrent connections per worker thread because all I/O is non-blocking. Configuration updates flow from the main thread to workers via a read-copy-update (RCU) mechanism using thread-local storage -- workers hold read-only config snapshots and never contend on shared mutable state.
+
+---
+
+### Q: How does Envoy's hot restart work? Why is it needed?
+
+**A:** Hot restart enables zero-downtime Envoy binary upgrades. The sequence:
+
+1. `pilot-agent` starts a new Envoy process with an incremented restart epoch.
+2. The new process connects to the old process via a Unix domain socket.
+3. The old process transfers its listener sockets using `SCM_RIGHTS` (Unix file descriptor passing).
+4. Both processes share a shared-memory region for stats counters (so counters persist across restarts).
+5. The old process enters drain mode -- stops accepting new connections but finishes in-flight requests.
+6. After the drain period (default 600s in Istio), the old process exits.
+
+In practice, hot restart is rarely triggered in Istio sidecar mode because xDS delivers config changes dynamically without restarts. It is more relevant for Envoy binary upgrades or crash recovery by `pilot-agent`.
+
+---
+
+### Q: What are the three types of Envoy filters? In what order do HTTP filters execute on requests vs responses?
+
+**A:** The three filter tiers:
+
+1. **Listener filters** (L3/L4, pre-connection): Run before filter chain selection. Inspect raw connection bytes. Examples: `tls_inspector` (reads SNI from ClientHello), `http_inspector` (sniffs for HTTP).
+2. **Network filters** (L4, connection-level): Operate on TCP byte streams after filter chain selection. Must end with a terminal filter like `tcp_proxy` or `http_connection_manager`.
+3. **HTTP filters** (L7, request/response): Operate on parsed HTTP. Only active when `http_connection_manager` is the network filter.
+
+HTTP filter execution order:
+
+```
+  Request (decode):   filter_1 → filter_2 → ... → router (terminal)
+  Response (encode):  router → ... → filter_2 → filter_1 (REVERSED)
+```
+
+On the decode path, filters execute in chain order. On the encode path, they execute in **reverse**. Any filter can short-circuit the chain -- for example, the RBAC filter returning 403 stops decode processing and the response goes back through the encode path.
+
+---
+
+### Q: How does outlier detection (passive health checking) differ from active health checking and Kubernetes readiness probes?
+
+**A:**
+
+| Aspect | Active Health Check | Outlier Detection | K8s Readiness Probe |
+|--------|-------------------|-------------------|-------------------|
+| **Mechanism** | Envoy sends periodic probe requests | Envoy monitors real traffic responses | kubelet sends periodic probes |
+| **Scope** | Per-proxy decision | Per-proxy decision | Global (affects Endpoints for all consumers) |
+| **Extra traffic** | Yes (synthetic probes) | No (uses real requests) | Yes (synthetic probes) |
+| **Reaction time** | Depends on interval | Immediate (on Nth failure) | Depends on interval + failure threshold |
+| **Recovery** | Automatic after healthy threshold | Automatic after ejection time expires | Automatic after success threshold |
+| **Granularity** | Per-endpoint | Per-endpoint | Per-pod |
+
+The key difference: Kubernetes readiness probes remove a pod from the global Service Endpoints (affecting all consumers), while outlier detection is **local to each Envoy proxy** -- one proxy may eject an endpoint while another still considers it healthy. This can happen when failures are path-dependent (e.g., network issues between specific nodes).
+
+In Istio, active health checking is not enabled by default. The primary health signal comes from Kubernetes readiness probes (propagated via EDS), supplemented by outlier detection configured through DestinationRule.
+
+---
+
+### Q: What is the evaluation order of AuthorizationPolicy actions? What happens if you have CUSTOM, DENY, and ALLOW policies?
+
+**A:** The evaluation order is strictly: **CUSTOM -> DENY -> ALLOW**.
+
+```
+  Request arrives
+       │
+       ▼
+  CUSTOM policies evaluated ───► Any deny? ──► 403 (stop)
+       │ (ext_authz call)              │
+       │                               No
+       ▼                               │
+  DENY policies evaluated ────► Any match? ──► 403 (stop)
+       │                               │
+       │                               No
+       ▼                               │
+  ALLOW policies exist?                │
+       │                               │
+       ├── No ALLOW policies ─────────► ALLOW (implicit allow-all)
+       │
+       └── ALLOW policies exist ──► Any match? ──► ALLOW
+                                        │
+                                        No match ──► 403 (deny)
+```
+
+Critical nuances:
+
+- If **no AuthorizationPolicy exists** at all for a workload, all traffic is allowed (implicit allow).
+- If an ALLOW policy exists with **zero matching rules** (empty `spec: {}`), all traffic is denied. This is the standard deny-by-default pattern.
+- DENY always wins over ALLOW. Even if an ALLOW rule matches, a matching DENY rule takes precedence.
+- CUSTOM is evaluated first. If the ext_authz service denies, neither DENY nor ALLOW policies are consulted.
+
+---
+
+### Q: RequestAuthentication allows requests with no JWT token. Why? How do you require a token?
+
+**A:** This is a deliberate design choice. `RequestAuthentication` only validates tokens that **are present**. If a request has no token, it passes through `RequestAuthentication` without error. If a request has an **invalid** token, it is rejected with 401.
+
+The rationale is separation of concerns: authentication (is this token valid?) is separate from authorization (is this caller allowed?). To require a token, pair `RequestAuthentication` with an `AuthorizationPolicy`:
+
+```yaml
+# 1. Validate tokens if present
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: require-jwt
+spec:
+  jwtRules:
+  - issuer: "https://auth.example.com"
+    jwksUri: "https://auth.example.com/.well-known/jwks.json"
+
+---
+# 2. Require a valid principal (which only exists if a valid JWT was provided)
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-auth
+spec:
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        requestPrincipals: ["*"]   # at least one principal must exist
+```
+
+Without the AuthorizationPolicy, unauthenticated (no-token) requests pass through freely.
+
+---
+
+### Q: What is ext_authz? When would you use it over AuthorizationPolicy?
+
+**A:** `ext_authz` (external authorization) delegates the authorization decision to an external service via gRPC or HTTP. Envoy sends request metadata (headers, path, source identity) to the external service and waits for an allow/deny response.
+
+Use ext_authz when:
+- Authorization logic requires database lookups, external API calls, or complex policy evaluation (e.g., OPA Rego policies)
+- You need to implement multi-tenant authorization where policies vary per tenant
+- You need to add custom response headers or transform the request based on authorization decisions
+- Static RBAC rules in AuthorizationPolicy are insufficient
+
+In Istio, ext_authz is triggered via `AuthorizationPolicy` with `action: CUSTOM`. The external service is registered as an `extensionProvider` in MeshConfig. The ext_authz filter executes **before** the RBAC filter in the Envoy chain, so CUSTOM decisions take priority over DENY and ALLOW policies.
+
+---
+
+### Q: How does distributed tracing work in Istio? What is the critical requirement for applications?
+
+**A:** Each Envoy sidecar automatically generates a trace **span** for every request it proxies -- one span for the inbound side and one for the outbound side. Spans are tagged with source/destination metadata and sent to a tracing backend (Jaeger, Zipkin, OTel Collector).
+
+```
+  Svc A (Envoy) ──► Svc B (Envoy) ──► Svc C (Envoy)
+  [Span: A→B]       [Span: B→C]
+
+  These spans are linked by a shared trace ID passed via headers.
+```
+
+The **critical requirement**: Applications must propagate trace context headers (`x-request-id`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-sampled`, `traceparent`) from incoming requests to all outgoing requests. Envoy cannot do this automatically because it does not understand the application-level relationship between an inbound request and the outbound calls it triggers. Without header propagation, each hop generates an independent trace -- multi-hop correlation is lost, and Jaeger shows disconnected single-span traces instead of a unified request tree.
+
+---
+
+### Q: What metrics does Istio generate automatically? How are they collected?
+
+**A:** Istio generates standard metrics via the `istio.stats` Wasm filter in every Envoy proxy. The key metrics:
+
+- `istio_requests_total` -- counter, broken down by source/destination workload, namespace, response code, protocol
+- `istio_request_duration_milliseconds` -- histogram with buckets
+- `istio_request_bytes` / `istio_response_bytes` -- size histograms
+- `istio_tcp_sent_bytes_total` / `istio_tcp_received_bytes_total` -- TCP byte counters
+
+These are exposed on each Envoy's `/stats/prometheus` endpoint on port 15090. Prometheus scrapes this port across all meshed pods (typically via PodMonitor or annotation-based discovery). Grafana dashboards then visualize the data.
+
+Istio ships with standard Grafana dashboards: Mesh Dashboard (global overview), Service Dashboard (per-service), Workload Dashboard (per-workload), and Control Plane Dashboard (istiod health).
+
+The Telemetry API (CRD) can customize metrics per-workload -- adding dimensions, disabling specific metrics, or changing tag values.
+
+---
+
+### Q: What is a WasmPlugin? When would you use it over an EnvoyFilter?
+
+**A:** A WasmPlugin is an Istio CRD that loads a WebAssembly module into Envoy as an HTTP filter. The module runs in a sandboxed VM (V8/Wasmtime) and can inspect/modify requests and responses.
+
+Use **WasmPlugin** when:
+- You need custom logic (custom metrics, header transformation, request validation) not available via Istio CRDs
+- You want a portable, safe extension that survives Istio upgrades
+- You are willing to accept ~10-50 microsecond overhead per invocation
+
+Use **EnvoyFilter** when:
+- You need to configure an Envoy feature not exposed by any Istio API
+- You need direct control over Envoy internals (e.g., changing listener bind config, adding bootstrap extensions)
+- You accept the risk of breakage across Istio version upgrades
+
+WasmPlugin is the preferred approach because it uses a stable ABI (proxy-wasm), is loaded via a supported Istio CRD, and does not patch raw Envoy config. EnvoyFilter is an escape hatch -- it directly manipulates generated Envoy config, which changes between Istio versions, making patches fragile.
+
+---
+
+### Q: What is the danger of using EnvoyFilter in production?
+
+**A:** EnvoyFilter patches reference internal Envoy configuration structures generated by Istio. These structures are **not part of Istio's stable API** and can change between minor versions. The specific dangers:
+
+1. **Silent breakage**: An EnvoyFilter that worked on Istio 1.20 may silently fail to match on 1.22 if the generated config structure changed. The patch applies to nothing, and the expected behavior is missing with no error.
+2. **Hard to debug**: When EnvoyFilter patches go wrong, the symptoms are often subtle -- a missing filter, an incorrect route, or unexpected 503s. There is no straightforward validation tool.
+3. **Ordering conflicts**: Multiple EnvoyFilters can conflict with each other, and their application order depends on creation timestamp and namespace, which is fragile.
+4. **Upgrade blocker**: Teams with many EnvoyFilters often cannot upgrade Istio without extensive testing of every patch.
+
+Best practice: always prefer WasmPlugin, Telemetry API, or higher-level CRDs. Reserve EnvoyFilter for features genuinely not exposed by any other API, and test them in CI against your target Istio version.
