@@ -1,8 +1,8 @@
 ---
+title: "HTTP Connection Behavior, Multiplexing, and gRPC Scaling in Go"
+---
 
-## title: "HTTP Connection Behavior, Multiplexing, and gRPC Scaling in Go"
-
-## ## Problem
+# Problem
 
 When working with networked services in Go (e.g., making HTTP requests), many developers assume that creating an `http.Client` immediately opens a TCP connection and that each `client.Do(req)` always opens a new connection. They also often misunderstand how HTTP/2 and gRPC scale under load.
 
