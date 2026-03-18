@@ -1,6 +1,6 @@
 ---
-title: "Istio Service Mesh: Architecture, xDS, Sidecar Injection, Traffic Interception, and Ambient Mode"
----
+
+## title: "Istio Service Mesh: Architecture, xDS, Sidecar Injection, Traffic Interception, and Ambient Mode"
 
 ## Overview
 
@@ -514,6 +514,20 @@ Ambient mode is a sidecar-less data plane architecture introduced to address the
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+
+
+```
+  ┌───────────────────────────────┬───────────────────────────────────────────────────────────────────┐      
+  │           Mechanism           │                             What for                              │
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────┤      
+  │ UDS                           │ Pass the namespace fd (one-time control plane handoff)            │
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────┤      
+  │ TCP sockets bound via setns() │ Ztunnel's listening ports inside pod's netns (data plane capture) │      
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────┤      
+  │ Veth + IP networking          │ Actual traffic between pods/nodes                                 │      
+  └───────────────────────────────┴───────────────────────────────────────────────────────────────────┘
+```
+
 ### ztunnel (Zero Trust Tunnel)
 
 - Written in **Rust** (not Envoy) -- purpose-built for L4 only
@@ -806,11 +820,11 @@ The key insight is that most services only need L4 security (mTLS + basic authz)
 
 **A:** The primary debugging tools:
 
-1. **`istioctl proxy-status`** (or `istioctl ps`): Shows whether each proxy is SYNCED or STALE with istiod. STALE means a config push failed or the proxy is disconnected.
-2. **`istioctl proxy-config`** (or `istioctl pc`): Dumps the actual Envoy configuration for a specific proxy. Sub-commands: `listeners` (LDS), `routes` (RDS), `clusters` (CDS), `endpoints` (EDS), `all` (full config dump). Use `-o json` for full detail. Example: `istioctl pc routes deploy/my-app` shows exactly which routes Envoy has.
+1. `**istioctl proxy-status`** (or `istioctl ps`): Shows whether each proxy is SYNCED or STALE with istiod. STALE means a config push failed or the proxy is disconnected.
+2. `**istioctl proxy-config**` (or `istioctl pc`): Dumps the actual Envoy configuration for a specific proxy. Sub-commands: `listeners` (LDS), `routes` (RDS), `clusters` (CDS), `endpoints` (EDS), `all` (full config dump). Use `-o json` for full detail. Example: `istioctl pc routes deploy/my-app` shows exactly which routes Envoy has.
 3. **Envoy Admin API** (port 15000): `kubectl port-forward deploy/my-app 15000:15000`, then `curl localhost:15000/config_dump` for the full config, `/clusters` for upstream health, `/stats` for metrics counters. You can change log levels at runtime with `/logging?level=debug`.
 4. **iptables inspection**: `kubectl exec deploy/my-app -c istio-proxy -- iptables -t nat -S` to verify the NAT rules are correct.
-5. **`istioctl analyze`**: Static analysis of Istio configuration in a namespace -- catches misconfigurations like missing DestinationRules for subsets referenced in VirtualServices.
+5. `**istioctl analyze`**: Static analysis of Istio configuration in a namespace -- catches misconfigurations like missing DestinationRules for subsets referenced in VirtualServices.
 6. **Access logs**: Enable Envoy access logging via MeshConfig (`accessLogFile: /dev/stdout`) to see every request with upstream/downstream details, response codes, and latency breakdowns.
 
 ---
