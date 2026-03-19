@@ -1,6 +1,6 @@
 ---
-
-## title: "Istio Service Mesh: Architecture, xDS, Sidecar Injection, Traffic Interception, and Ambient Mode"
+title: "Istio Service Mesh: Architecture, xDS, Sidecar Injection, Traffic Interception, and Ambient Mode"
+---
 
 ## Overview
 
