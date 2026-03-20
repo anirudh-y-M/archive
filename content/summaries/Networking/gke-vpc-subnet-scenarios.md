@@ -6,11 +6,17 @@ title: "Summary: GKE Networking - Subnet Allocation Q&A"
 
 ## Key Concepts
 
-- **Separate subnets per cluster** (best practice): Each GKE cluster gets its own non-overlapping subnet within the same VPC. Pods can natively route between clusters via internal IPs. Provides isolation, independent firewall rules, and dedicated IP pools.
+### Separate Subnets per Cluster (Best Practice)
 
-- **Shared subnet**: Two clusters can share the same primary subnet (node IPs), but they **must** use different secondary ranges for Pods and Services. Simpler infra management, but risk of IP exhaustion and blast radius issues.
+Each GKE cluster gets its own non-overlapping subnet within the same VPC. This enables native pod-to-pod routing between clusters using internal IPs without extra configuration. Each cluster has dedicated IP pools for nodes, pods, and services. VPC firewall rules can target individual subnets without cross-cluster impact. The trade-off is consuming more total IP address space from the VPC.
 
-- **Nested (child) subnets**: Not allowed. GCP rejects overlapping CIDRs because Cloud Router cannot resolve ambiguous routing targets.
+### Shared Subnet (Same Primary Range)
+
+Two clusters can share a single primary subnet for node IPs, but they **must** use different secondary ranges for pods and services. This simplifies shared infrastructure management (e.g., a single NAT gateway or one set of firewall rules). The risks are significant: you must manually prevent secondary range overlaps, the primary range can exhaust (blocking node scaling for both clusters), and a networking issue in the shared subnet impacts both clusters simultaneously.
+
+### Nested (Child) Subnets -- Forbidden
+
+Google Cloud blocks the creation of a subnet whose CIDR is a subset of an existing subnet. The API returns an error. The reason is that Cloud Router cannot determine whether traffic for an IP should go to the "parent" or "child" subnet, creating a routing conflict. VPCs require all subnet ranges to be unique and non-overlapping.
 
 ## Quick Reference
 
@@ -33,7 +39,7 @@ VPC CIDR: 10.0.0.0/16
 
 ## Key Takeaways
 
-- Always use separate, non-overlapping subnets for GKE clusters -- this is GCP's recommended pattern.
-- If sharing a subnet, ensure secondary ranges (pods/services) never overlap between clusters.
-- GCP will block any attempt to create overlapping CIDR subnets at the API level.
+- Always use separate, non-overlapping subnets for GKE clusters -- this is GCP's recommended pattern for isolation and easy routing.
+- If sharing a subnet, ensure secondary ranges (pods/services) never overlap between clusters, and accept the blast radius risk.
+- GCP will block any attempt to create overlapping CIDR subnets at the API level -- Cloud Router cannot resolve ambiguous routes.
 - Each cluster needs three IP ranges: primary (nodes), secondary for pods, secondary for services.
