@@ -74,3 +74,4 @@ Server                          Client
 - Abstract sockets (`@name`, Linux only) live in memory and eliminate the cleanup problem entirely.
 - `cat`/`echo` fail on sockets because they use `open()` instead of `socket()`+`connect()` syscalls.
 - In Go, always reuse the same socket path, clean up with `os.Remove` before binding, and set `conn.SetDeadline()` to prevent zombie connections.
+
