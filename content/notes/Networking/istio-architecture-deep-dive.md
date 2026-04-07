@@ -715,6 +715,7 @@ kubectl exec deploy/my-app -c istio-proxy -- iptables -t nat -S
 - [[notes/Networking/istio-traffic-management|Istio Traffic Management]] -- VirtualService, DestinationRule, Gateway API
 - [[notes/Networking/istio-security|Istio Security]] -- mTLS, SPIFFE, AuthorizationPolicy, JWT, ext_authz
 - [[notes/Networking/istio-observability-extensibility|Istio Observability & Extensibility]] -- metrics, tracing, Kiali, WasmPlugin, EnvoyFilter
+- [[notes/Networking/istio-service-discovery-dns-listeners|Istio Service Discovery, DNS & Listeners]] -- service discovery without mesh membership, DNS resolution, outboundTrafficPolicy, shared listeners
 - [[notes/Networking/tls-1.3-handshake|TLS 1.3 Handshake]] -- mTLS in Istio uses TLS under the hood
 - [[notes/Networking/docker-proxy-networking-in-k8s|Docker Proxy Networking in K8s]] -- iptables and network namespaces context
 - [[notes/K8s/daemonset-pod-race-conditions|DaemonSet Pod Race Conditions]] -- relevant to istio-init race conditions
