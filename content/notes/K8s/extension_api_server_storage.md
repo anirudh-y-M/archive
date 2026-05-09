@@ -122,3 +122,8 @@ If you switch to SQL or In-Memory, you lose some "magic" features that Kubernete
 ### **Next Step**
 
 Would you like to see a **diagram** of the request flow, showing how `kubectl` talks to the main API server and how that request gets routed to a custom External API Server with a SQL backend?
+
+## Related
+
+- [[notes/K8s/kube-apiserver-request-routing|kube-apiserver Request Routing]] — full breakdown of built-in vs CRD vs aggregated handlers, request flow diagrams, and authentication delegation flags.
+- [[notes/K8s/hpa-vpa-autoscaling|HPA / VPA / metrics-server]] — the canonical aggregated-apiserver use case (`metrics.k8s.io`, `custom.metrics.k8s.io`, `external.metrics.k8s.io`).
