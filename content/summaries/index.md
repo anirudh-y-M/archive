@@ -11,6 +11,7 @@ Short, plain-English summaries of every note — designed for fast interview pre
 | [[summaries/AuthNZ/OAUTH_IMPLEMENTATION\|OAuth Implementation in SFD]] | [[notes/AuthNZ/OAUTH_IMPLEMENTATION\|Full Notes →]] |
 | [[summaries/AuthNZ/OIDC_Oauth\|SSO, SAML, OAuth 2.0, OIDC, JWT & WIF]] | [[notes/AuthNZ/OIDC_Oauth\|Full Notes →]] |
 | [[summaries/AuthNZ/github-actions-token-anatomy\|GitHub Actions Token Anatomy]] | [[notes/AuthNZ/github-actions-token-anatomy\|Full Notes →]] |
+| [[summaries/AuthNZ/http-sessions-cookies-security\|HTTP Sessions, Cookies & Cookie Security]] | [[notes/AuthNZ/http-sessions-cookies-security\|Full Notes →]] |
 | [[summaries/AuthNZ/mcp-oauth\|MCP OAuth 2.1]] | [[notes/AuthNZ/mcp-oauth\|Full Notes →]] |
 | [[summaries/AuthNZ/self_signed_certificate\|Self-Signed Certificates]] | [[notes/AuthNZ/self_signed_certificate\|Full Notes →]] |
 
@@ -84,6 +85,8 @@ Short, plain-English summaries of every note — designed for fast interview pre
 | [[summaries/Networking/istio-envoy-internals\|Istio Envoy Internals]] | [[notes/Networking/istio-envoy-internals\|Full Notes →]] |
 | [[summaries/Networking/istio-observability-extensibility\|Istio Observability & Extensibility]] | [[notes/Networking/istio-observability-extensibility\|Full Notes →]] |
 | [[summaries/Networking/istio-security\|Istio Security]] | [[notes/Networking/istio-security\|Full Notes →]] |
+| [[summaries/Networking/istio-service-discovery-dns-listeners\|Istio Service Discovery, DNS & Listeners]] | [[notes/Networking/istio-service-discovery-dns-listeners\|Full Notes →]] |
+| [[summaries/Networking/istio-tls-layering\|Istio TLS Layering]] | [[notes/Networking/istio-tls-layering\|Full Notes →]] |
 | [[summaries/Networking/istio-traffic-management\|Istio Traffic Management]] | [[notes/Networking/istio-traffic-management\|Full Notes →]] |
 | [[summaries/Networking/kubernetes-grpc-loadbalancing-headless-dns-anycast-qa\|K8s gRPC Load Balancing & DNS]] | [[notes/Networking/kubernetes-grpc-loadbalancing-headless-dns-anycast-qa\|Full Notes →]] |
 | [[summaries/Networking/nat_relay_server\|TURN Server]] | [[notes/Networking/nat_relay_server\|Full Notes →]] |
