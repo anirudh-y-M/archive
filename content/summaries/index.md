@@ -58,7 +58,10 @@ Short, plain-English summaries of every note — designed for fast interview pre
 | [[summaries/K8s/chkk_issue\|Chkk Install Issue]] | [[notes/K8s/chkk_issue\|Full Notes →]] |
 | [[summaries/K8s/daemonset-pod-race-conditions\|DaemonSet Pod Race Conditions]] | [[notes/K8s/daemonset-pod-race-conditions\|Full Notes →]] |
 | [[summaries/K8s/extension_api_server_storage\|Extension API Server]] | [[notes/K8s/extension_api_server_storage\|Full Notes →]] |
+| [[summaries/K8s/hpa-vpa-autoscaling\|HPA / VPA Autoscaling]] | [[notes/K8s/hpa-vpa-autoscaling\|Full Notes →]] |
+| [[summaries/K8s/kube-apiserver-request-routing\|kube-apiserver Request Routing]] | [[notes/K8s/kube-apiserver-request-routing\|Full Notes →]] |
 | [[summaries/K8s/kubernetes\|Kubernetes Concepts]] | [[notes/K8s/kubernetes\|Full Notes →]] |
+| [[summaries/K8s/pod-deletion-lifecycle-and-garbage-collection\|Pod Deletion Lifecycle & Garbage Collection]] | [[notes/K8s/pod-deletion-lifecycle-and-garbage-collection\|Full Notes →]] |
 
 ## Networking
 

@@ -316,8 +316,155 @@ Practical consequences:
 
 ---
 
+## What the API Server Does Beyond Proxying etcd
+
+The routing story above answers *where* a request is handled. This section answers a different question that comes up constantly: **if etcd is the database, what is the API server actually for?**
+
+The framing "kube-apiserver is a thin REST wrapper over etcd" is wrong by a wide margin. etcd is the *dumb* part — a linearizable key/value store with no notion of a Pod, a namespace, or a label. **Every piece of Kubernetes semantics lives in the API server.** It is a policy-and-semantics engine that happens to persist to etcd.
+
+And there is exactly one path to etcd:
+
+```
+kubelet ─┐
+scheduler┤
+KCM      ├──── HTTPS ────▶ kube-apiserver ────▶ etcd
+operators┤                (the ONLY etcd client)
+kubectl ─┘
+
+Nothing else in Kubernetes has etcd credentials. A hard architectural
+invariant — which is also why the audit log is complete, why RBAC is
+enforceable at all, and why encryption-at-rest works.
+```
+
+### The Request Pipeline, In Order
+
+```
+   TLS handshake
+        │
+        ▼
+   API Priority & Fairness  ── queue admission, concurrency shares, FlowSchema
+        │                      (see "API Priority and Fairness Implications" above)
+        ▼
+   AUTHENTICATION           ── x509 client certs, ServiceAccount JWTs, OIDC,
+        │                      authenticating webhook, bootstrap tokens
+        │                      ⇒ produces the identity: system:node:<name>,
+        │                        system:serviceaccount:<ns>:<sa>, alice@corp
+        ▼
+   AUTHORIZATION            ── RBAC, Node authorizer, ABAC, authz webhook
+        │                      (modes run in order; first ALLOW wins)
+        ▼
+   MUTATING ADMISSION       ── built-in plugins, then MutatingAdmissionWebhooks,
+        │                      then MutatingAdmissionPolicy (CEL)
+        ▼
+   SCHEMA + OBJECT VALIDATION  ── OpenAPI structural schema, then Go validation
+        │                          (or CEL x-kubernetes-validations for CRDs)
+        ▼
+   VALIDATING ADMISSION     ── built-in plugins, ValidatingAdmissionWebhooks,
+        │                      ValidatingAdmissionPolicy (CEL, GA 1.30)
+        ▼
+   REGISTRY / STRATEGY      ── defaulting, version conversion, finalizer
+        │                      handling, deletionTimestamp, subresource logic,
+        │                      resourceVersion / optimistic concurrency
+        ▼
+   ENCRYPTION AT REST       ── envelope encryption (KMS v2 / AES-GCM)
+        │
+        ▼
+      etcd
+
+   ╰──▶ AUDIT events emitted at RequestReceived / ResponseStarted /
+        ResponseComplete / Panic, per the configured audit policy
+```
+
+Stage-by-stage, what actually matters:
+
+- **Authentication** is where `system:node:<node-name>` comes from. The kubelet presents a client certificate whose CN is `system:node:<name>` and whose O is `system:nodes`. That identity is what makes the next stage possible.
+- **Authorization** — beyond RBAC, the **Node authorizer** is a dedicated authz mode that restricts each kubelet to objects relevant to *its own* node: only the Secrets/ConfigMaps mounted by pods scheduled there, only its own Node object, only pods bound to it. Without it, a single compromised kubelet could read every Secret in the cluster. This is why the finalizing `DELETE` a kubelet sends for a terminating pod is safe to permit at all.
+- **Mutating admission** is why *the object you submitted is not the object that gets stored*. Built-in plugins plus webhooks inject Istio sidecars, mount the projected ServiceAccount token volume, add `imagePullSecrets` from the SA, apply `LimitRange` defaults, default the StorageClass / IngressClass, add `node.kubernetes.io/not-ready` tolerations, and set `spec.priority` from the PriorityClass. Compare `kubectl get pod -o yaml` against your manifest and count the differences.
+- **Validating admission** is `ResourceQuota`, `PodSecurity`, `NamespaceLifecycle` (rejects creates in a Terminating namespace), `LimitRanger`, plus Gatekeeper / Kyverno policies. Note the ordering: mutation happens *before* validation deliberately, so a sidecar injected by a webhook is still subject to quota.
+- **Audit** exists precisely because the API server is the universal chokepoint. Every mutation in the cluster passes through here, so a single audit policy captures everything.
+
+### Semantics the API Server Owns (Not etcd, Not Controllers)
+
+| Concern | What the API server does |
+|---|---|
+| Optimistic concurrency | Maps `metadata.resourceVersion` ↔ etcd revision; returns `409 Conflict` on a stale write. etcd has revisions; *pods* having resourceVersions is the API server's invention. |
+| Patch semantics | Strategic-merge patch (needs Go struct tags — etcd cannot do this), JSON Patch (RFC 6902), JSON Merge Patch (RFC 7386), and Server-Side Apply with per-field ownership tracked in `metadata.managedFields` |
+| API version conversion | Stores **one** version, converts on read and write. `v1beta1` ↔ `v1` is transparent to clients; etcd holds only the storage version |
+| Defaulting | Fills unset fields from the schema before persisting (`imagePullPolicy`, `restartPolicy: Always`, `terminationGracePeriodSeconds: 30`, `dnsPolicy`, `successfulJobsHistoryLimit: 3`) |
+| Deletion semantics | `deletionTimestamp`, `deletionGracePeriodSeconds`, finalizer blocking, `propagationPolicy`. **The object survives a `DELETE` until finalizers clear — enforced here, not by any controller.** See [[notes/K8s/pod-deletion-lifecycle-and-garbage-collection\|Pod Deletion Lifecycle & GC]] |
+| Name / UID generation | `metadata.generateName` → random suffix with collision retry, UID assignment, `creationTimestamp`, `generation` bumping |
+| Watch cache | Serves most LIST/WATCH from an in-memory reflector per resource; emits `Bookmark` events; **consistent reads served from cache** (`ConsistentListFromCache`: Beta-on 1.31, GA 1.34, needs etcd ≥ v3.4.31 / v3.5.13 for watch-progress). Most reads never reach etcd at all |
+| Field & label selectors, pagination | Server-side filtering, plus `limit`/`continue` chunking (the `continue` token encodes an etcd revision + key) |
+| Encryption at rest | Envelope encryption of Secrets and other configured resources — etcd only ever sees ciphertext |
+| Event TTL | `--event-ttl` (default `1h0m0s`) implemented as an etcd lease on Event keys |
+| ClusterIP / NodePort allocation | Stateful in-process allocation from the Service CIDR and the node-port range, with a repair loop for drift |
+| Dry-run | Runs the *entire* pipeline — including webhooks — then discards instead of persisting |
+
+### Subresources with Real Business Logic
+
+A subresource is not merely a storage split; several carry behavior that exists nowhere else.
+
+| Subresource | What it does |
+|---|---|
+| `pods/eviction` | **Checks PodDisruptionBudgets.** Returns `200` (allowed, then deletes), `429 Too Many Requests` (budget would be violated), `500` (pod covered by multiple PDBs). This PDB logic lives *in the API server* — which is exactly why a plain `DELETE` on a pod bypasses PDBs entirely |
+| `pods/exec`, `pods/attach`, `pods/portforward` | Authorizes, upgrades the connection (SPDY or WebSocket), and streams bidirectionally to the kubelet |
+| `pods/log` | Proxies to the kubelet's log endpoint; handles `follow`, `tailLines`, `previous` |
+| `pods/binding` | How kube-scheduler assigns `spec.nodeName`. The scheduler never PATCHes the pod spec directly |
+| `pods/status` | The only way kubelet reports phase/conditions. `PrepareForUpdate` here explicitly forces `spec = oldSpec` and `deletionTimestamp = nil`, so a status write can never mutate the spec or fake a deletion |
+| `pods/resize` | In-place vertical resource resize. Alpha 1.27, Beta 1.33, **GA 1.35** (`InPlacePodVerticalScaling`) |
+| `serviceaccounts/token` | Issues signed, audience-scoped, time-bound JWTs (TokenRequest API). This is a **cryptographic service**, not storage |
+| `*/scale` | A uniform `Scale` shape over Deployment/RS/StatefulSet, and the surface HPA writes to |
+| `*/status` generally | A separate RBAC surface *and* a separate Server-Side-Apply field-ownership domain, so a controller owning `status` cannot clobber user-owned `spec` |
+| `nodes/proxy`, `services/proxy` | Generic authorizing proxy into the cluster |
+
+### Services the API Server Provides to Other Components
+
+- **TokenReview** (`authentication.k8s.io/v1`) — the kubelet uses it to authenticate requests hitting its *own* `:10250` API. So when metrics-server scrapes a kubelet, the kubelet turns around and asks the API server "is this token valid?"
+- **SubjectAccessReview** (`authorization.k8s.io/v1`) — the kubelet then asks "is this identity allowed to read `nodes/metrics`?" Also what `kubectl auth can-i` calls, and what aggregated apiservers use for fine-grained authz after delegated authentication (see the delegation flow above).
+- **CertificateSigningRequest** — the API is hosted here; the actual *signing* is done by kube-controller-manager's signer controllers. This is the node bootstrap path (`kubelet-serving`, `kube-apiserver-client-kubelet`).
+- **The aggregation layer** and **CRD machinery** — covered in detail earlier in this note.
+- **`/openapi/v2` and `/openapi/v3`** — how `kubectl explain`, client-side apply, and schema-aware tooling discover types.
+- **`/healthz`, `/livez`, `/readyz`** (`?verbose` for per-check breakdown) and **`/metrics`**.
+
+### What It Deliberately Does *Not* Do
+
+**Reconciliation.** There are no control loops in the API server. It is strictly request/response plus watch. Desired-state convergence is kube-controller-manager's job.
+
+```
+kube-apiserver  =  synchronous validation, admission, persistence, notification
+controllers     =  asynchronous reconciliation toward desired state
+```
+
+A handful of bootstrap-ish exceptions prove the rule rather than break it: it reconciles the endpoints of the default `kubernetes` Service in `default`, runs repair loops for ClusterIP / NodePort allocation drift, and re-reconciles bootstrap RBAC (`system:*` ClusterRoles and bindings) on every startup so you cannot permanently lock yourself out.
+
+### Tying It Back: One Line of a Pod Deletion
+
+When a kubelet finishes tearing down a terminating pod and sends the finalizing delete:
+
+```
+DELETE /api/v1/namespaces/prod/pods/api-8545cb-h4k2p?gracePeriodSeconds=0
+  Authorization: Bearer <or mTLS client cert>
+  body: DeleteOptions{ gracePeriodSeconds: 0, preconditions: { uid: "..." } }
+
+  ① APF        → admitted to a flow queue
+  ② authn      → identity = system:node:gke-pool-a-9x7q  (x509 CN)
+  ③ authz      → Node authorizer: is this pod bound to THIS node? yes → allow
+  ④ admission  → any DELETE webhooks matching pods get an AdmissionReview
+                 with object:null, oldObject:<pod>, options:<DeleteOptions>
+  ⑤ registry   → UID precondition matches? finalizers empty? yes to both
+  ⑥ etcd       → DELETE /registry/pods/prod/api-8545cb-h4k2p
+  ⑦ audit      → methodName io.k8s.core.v1.pods.delete,
+                 principalEmail system:node:gke-pool-a-9x7q
+  ⑧ watch      → DELETED event fanned out to every informer
+```
+
+"Kubelet deleted the pod" is really *kubelet asked and the API server decided*. Full breakdown in [[notes/K8s/pod-deletion-lifecycle-and-garbage-collection|Pod Deletion Lifecycle, Garbage Collection, and Who Actually Deletes a Pod]].
+
+---
+
 ## See also
 
+- [[notes/K8s/pod-deletion-lifecycle-and-garbage-collection|Pod Deletion Lifecycle & Garbage Collection]] — the deletion semantics, finalizers, admission-on-DELETE, and `pods/eviction` PDB logic described above, end to end.
 - [[notes/K8s/hpa-vpa-autoscaling|HPA / VPA / metrics-server / Custom + External Metrics]] — canonical real-world example of all three categories at once.
 - [[notes/K8s/extension_api_server_storage|Extension API Server Storage]] — storage choices once you go aggregated.
 - [[notes/K8s/kubernetes|Kubernetes Concepts]] — DaemonSets, taints, scheduling primitives.
@@ -477,3 +624,89 @@ every kubectl call until the client cache rebuilds.
 ```
 
 This is why one broken aggregated apiserver can degrade *every* `kubectl` command — discovery is on the hot path. The aggregator's discovery cache (refreshed every 30s by default) mitigates but doesn't eliminate it.
+
+### Q: If etcd is the database, what does kube-apiserver actually add? Isn't it just a REST wrapper?
+
+**A:** It is the opposite of a thin wrapper. etcd is a linearizable key/value store with **no concept of a Pod, a namespace, a label, or a Secret**. Every Kubernetes semantic lives in the API server.
+
+```
+                     etcd knows          kube-apiserver knows
+                     ──────────          ───────────────────
+keys/values              ✔                       ✔
+revisions                ✔              resourceVersion + 409 Conflict
+watch on a key range     ✔              typed watch cache, bookmarks, selectors
+                         ✗              schemas, defaulting, validation
+                         ✗              API version conversion (v1beta1 ↔ v1)
+                         ✗              admission (mutating + validating)
+                         ✗              RBAC / Node authorizer
+                         ✗              deletionTimestamp + finalizers
+                         ✗              strategic-merge patch, Server-Side Apply
+                         ✗              subresources (eviction, exec, log, token)
+                         ✗              encryption at rest (etcd sees ciphertext)
+                         ✗              ClusterIP / NodePort allocation
+                         ✗              audit
+```
+
+Concrete proof points to reach for in an interview:
+
+1. **Your object is not what you submitted.** Mutating admission injects sidecars, SA token volumes, `imagePullSecrets`, LimitRange defaults, PriorityClass values. `diff` your manifest against `kubectl get -o yaml`.
+2. **`pods/eviction` contains PodDisruptionBudget logic.** A plain `DELETE` on the same pod bypasses PDBs completely. That asymmetry only makes sense if the business logic lives in the API server, not in etcd or a controller.
+3. **`serviceaccounts/token` is a crypto service** — it signs audience-scoped, time-bound JWTs. Nothing about that is storage.
+4. **Deletion is not deletion.** A `DELETE` on an object with finalizers writes `deletionTimestamp` and keeps the etcd key. Enforced in the registry layer, not by any controller.
+5. **Most reads never touch etcd.** The watch cache serves LIST/WATCH from memory, and since `ConsistentListFromCache` (Beta-on 1.31, GA 1.34) even *consistent* lists are served from cache using etcd watch-progress notifications.
+
+The one thing it deliberately does **not** do is reconcile. No control loops (bar a few bootstrap repair loops: the default `kubernetes` Service endpoints, ClusterIP/NodePort allocation drift, bootstrap RBAC). The clean line: **API server = synchronous validation, admission, persistence, notification. Controllers = asynchronous reconciliation.**
+
+### Q: A kubelet sends `DELETE pods/x?gracePeriodSeconds=0`. Walk the request through the API server.
+
+**A:** Every stage does real work, and the answer shows why "kubelet deletes the pod" is a misstatement.
+
+```
+① APF          FlowSchema match (kubelet traffic → system-node-high or similar);
+               admitted to a queue with a concurrency share
+② AUTHN        x509 client cert, CN=system:node:gke-pool-a-9x7q, O=system:nodes
+               ⇒ identity established
+③ AUTHZ        Node authorizer (not plain RBAC): may this kubelet delete THIS
+               pod? Only if pod.spec.nodeName == this node. Otherwise 403.
+               ← this is what stops one compromised kubelet from deleting
+                 pods (or reading Secrets) cluster-wide
+④ ADMISSION    matching DELETE webhooks get an AdmissionReview with
+               object: null, oldObject: <the pod as persisted>,
+               options: <DeleteOptions incl. gracePeriodSeconds: 0>
+               failurePolicy: Fail + webhook down ⇒ the delete is BLOCKED
+⑤ REGISTRY     UID precondition matches? (guards against deleting a recreated
+               pod of the same name).  finalizers empty? if not → the key STAYS
+               and only deletionTimestamp is (re)written
+⑥ etcd         DELETE /registry/pods/prod/x     ← the only actual etcd call
+⑦ AUDIT        methodName: io.k8s.core.v1.pods.delete
+               principalEmail: system:node:gke-pool-a-9x7q
+⑧ WATCH        DELETED event fanned out to every informer (RS controller,
+               EndpointSlice controller, your operator, kubectl -w)
+```
+
+Six of those eight stages are pure API-server policy. The kubelet **requested**; the API server **decided**. Full deletion-lifecycle breakdown in [[notes/K8s/pod-deletion-lifecycle-and-garbage-collection|Pod Deletion Lifecycle & Garbage Collection]].
+
+### Q: Why does the kubelet's own `:10250` API call back into kube-apiserver?
+
+**A:** Because the kubelet is not an identity provider or a policy engine. When metrics-server scrapes `https://<node>:10250/metrics/resource`, the kubelet delegates both halves of the decision:
+
+```
+metrics-server ──Bearer <SA token>──▶ kubelet :10250
+                                         │
+                    ┌────────────────────┴────────────────────┐
+                    ▼                                         ▼
+        POST /apis/authentication.k8s.io/v1/           POST /apis/authorization.k8s.io/v1/
+             tokenreviews                                   subjectaccessreviews
+        "is this token valid, and who is it?"          "may that identity GET
+                    │                                   nodes/metrics on this node?"
+                    ▼                                         ▼
+             kube-apiserver                             kube-apiserver (RBAC)
+                    │                                         │
+                    └──────── allowed / denied ◀──────────────┘
+                                    │
+                              kubelet serves or 403s
+```
+
+Requires `--authentication-token-webhook=true` and `--authorization-mode=Webhook` in the kubelet config (the default on GKE and kubeadm clusters). Set `--authorization-mode=AlwaysAllow` and anyone who can reach port 10250 can exec into any container on that node — a well-known misconfiguration.
+
+Note the symmetry with the aggregation layer described earlier: aggregated apiservers *also* use SubjectAccessReview for fine-grained authz after kube-apiserver has already authenticated the caller. `TokenReview` / `SubjectAccessReview` are the generic "outsource the decision to the API server" primitives.

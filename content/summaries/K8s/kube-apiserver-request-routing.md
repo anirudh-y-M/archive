@@ -149,6 +149,72 @@ APF (GA 1.29) — admission, queueing, FlowSchema matching all happen on the kub
 - Discovery (`/apis/<group>`) has its own implicit budget — extension expected to respond in **5s or less**; breaches show as `FailedDiscoveryCheck`.
 - Cascade: metrics-server overloaded → clients retry → kube-apiserver fills concurrency → unrelated requests time out.
 
+### What the API server does beyond proxying etcd
+
+**"kube-apiserver is a thin REST wrapper over etcd" is wrong by a wide margin.** etcd is a linearizable KV store with **no concept of a Pod, namespace, label, or Secret**. All Kubernetes semantics live in the API server. And there is exactly **one** etcd client in the whole system — nothing else has etcd credentials, which is also why the audit log is complete and RBAC is enforceable at all.
+
+Request pipeline, in order:
+
+```
+TLS → APF (queue admission, concurrency, FlowSchema)
+    → AUTHENTICATION   → identity (system:node:<name>, system:serviceaccount:…)
+    → AUTHORIZATION    → RBAC / Node authorizer / ABAC / authz webhook
+    → MUTATING ADMISSION   → built-ins + MutatingAdmissionWebhooks + MutatingAdmissionPolicy
+    → SCHEMA + OBJECT VALIDATION
+    → VALIDATING ADMISSION → built-ins + ValidatingAdmissionWebhooks + ValidatingAdmissionPolicy (CEL, GA 1.30)
+    → REGISTRY / STRATEGY  → defaulting, conversion, finalizers, deletionTimestamp, resourceVersion
+    → ENCRYPTION AT REST   → KMS v2 / AES-GCM
+    → etcd
+  ↳ AUDIT at RequestReceived / ResponseStarted / ResponseComplete / Panic
+```
+
+- **Authentication** is where `system:node:<node-name>` comes from (client cert CN `system:node:<name>`, O `system:nodes`).
+- The **Node authorizer** is a dedicated authz mode restricting each kubelet to objects relevant to *its own* node — only Secrets/ConfigMaps mounted by pods scheduled there, only its own Node, only pods bound to it. Without it, one compromised kubelet reads every Secret in the cluster.
+- **Mutating admission** is why *the stored object differs materially from what you submitted*: Istio sidecars, projected SA token volumes, `imagePullSecrets`, LimitRange defaults, default StorageClass/IngressClass, `not-ready` tolerations, PriorityClass → `spec.priority`.
+- **Validating admission** = ResourceQuota, PodSecurity, NamespaceLifecycle, LimitRanger, plus Gatekeeper/Kyverno. Mutation runs *before* validation deliberately, so an injected sidecar is still subject to quota.
+
+Semantics the API server owns (not etcd, not controllers):
+
+| Concern | What it does |
+|---|---|
+| Optimistic concurrency | `metadata.resourceVersion` ↔ etcd revision; `409 Conflict` |
+| Patch semantics | strategic-merge (needs Go struct tags), JSON Patch (RFC 6902), JSON Merge (RFC 7386), SSA with `metadata.managedFields` |
+| API version conversion | stores **one** version, converts on read/write; `v1beta1` ↔ `v1` transparent |
+| Defaulting | `restartPolicy: Always`, `terminationGracePeriodSeconds: 30`, `imagePullPolicy`, `successfulJobsHistoryLimit: 3` |
+| Deletion semantics | `deletionTimestamp`, `deletionGracePeriodSeconds`, finalizer blocking, `propagationPolicy` — **the object survives DELETE until finalizers clear, enforced here** |
+| Name/UID generation | `generateName` suffix + collision retry, UID, `creationTimestamp`, `generation` bumping |
+| Watch cache | serves most LIST/WATCH from memory; bookmarks; **consistent reads from cache** (`ConsistentListFromCache` Beta-on 1.31, **GA 1.34**, needs etcd ≥ v3.4.31/v3.5.13). Most reads never reach etcd |
+| Selectors, pagination | server-side field/label filtering; `limit`/`continue` (token encodes an etcd revision + key) |
+| Encryption at rest | envelope encryption — etcd only ever sees ciphertext |
+| Event TTL | `--event-ttl` (default `1h0m0s`) via etcd lease |
+| ClusterIP / NodePort allocation | stateful in-process allocation + repair loop for drift |
+| Dry-run | full pipeline including webhooks, then discards |
+
+Subresources with real business logic:
+
+| Subresource | What it does |
+|---|---|
+| `pods/eviction` | **checks PodDisruptionBudgets** → `200` allowed / `429` blocked / `500` multiple PDBs. This is why a plain `DELETE` on a pod bypasses PDBs entirely |
+| `pods/exec`, `attach`, `portforward` | authorize, upgrade (SPDY/WebSocket), stream to kubelet |
+| `pods/log` | proxies to kubelet's log endpoint (`follow`, `tailLines`, `previous`) |
+| `pods/binding` | how kube-scheduler assigns `spec.nodeName` |
+| `pods/status` | `PrepareForUpdate` forces `spec = oldSpec` and `deletionTimestamp = nil`, so a status write can never mutate spec or fake a deletion |
+| `pods/resize` | in-place vertical resize — Alpha 1.27, Beta 1.33, **GA 1.35** |
+| `serviceaccounts/token` | signs audience-scoped, time-bound JWTs — a **crypto service**, not storage |
+| `*/scale`, `*/status` | separate RBAC surface **and** separate SSA field-ownership domain |
+| `nodes/proxy`, `services/proxy` | generic authorizing proxy |
+
+Services offered to other components: **TokenReview** (kubelet uses it to authenticate callers to its own `:10250`, e.g. metrics-server), **SubjectAccessReview** (kubelet authorizes them; also `kubectl auth can-i` and aggregated-apiserver fine-grained authz), **CertificateSigningRequest** (API hosted here; signing done by KCM's signer controllers), the aggregation layer and CRD machinery (above), `/openapi/v2` + `/openapi/v3` (`kubectl explain`, client-side apply), `/healthz` `/livez` `/readyz` `/metrics`.
+
+**What it deliberately does NOT do: reconciliation.** No control loops — strictly request/response plus watch.
+
+> API server = synchronous validation, admission, persistence, notification.
+> Controllers = asynchronous reconciliation toward desired state.
+
+Bootstrap-ish exceptions that prove the rule: it reconciles the default `kubernetes` Service's endpoints, runs repair loops for ClusterIP/NodePort allocation drift, and re-reconciles bootstrap RBAC (`system:*` ClusterRoles) on startup.
+
+**Tying it back:** when a kubelet sends `DELETE pods/x?gracePeriodSeconds=0`, the API server runs APF → authn (`system:node:<node>`) → **Node authorizer** (is this pod bound to *this* node?) → admission (DELETE webhooks get `object: null`, `oldObject: <pod>`, `options: <DeleteOptions>`) → registry (UID precondition, finalizers empty?) → etcd delete → audit → watch fan-out. **Kubelet asks; the API server decides.** See [[notes/K8s/pod-deletion-lifecycle-and-garbage-collection|Pod Deletion Lifecycle & GC]].
+
 ## Quick Reference
 
 ### Routing diagram
@@ -213,3 +279,7 @@ kubectl get endpoints -n kube-system metrics-server
 - APF (GA 1.29) admission happens before the proxy hop on the kube-apiserver side. A slow extension can still exhaust kube-apiserver goroutines holding `--request-timeout` (60s default) connections.
 - For debugging: walk `kubectl get apiservices` → `describe` → check Service/Endpoints/Pods → check extension logs for `x509` or `unable to extract user from request` → end-to-end with `kubectl get --raw`.
 - A CRD can technically be served by an aggregated apiserver (sample-apiserver pattern), but you give up all of kube-apiserver's free validation/defaulting/watch/RBAC machinery — only worth it for non-etcd storage of CRD-shaped data.
+- kube-apiserver is **not** a thin wrapper over etcd. etcd knows keys, revisions, and range watches; everything else — schemas, defaulting, conversion, admission, RBAC, `resourceVersion`/409s, strategic-merge and SSA, finalizers and `deletionTimestamp`, subresources, encryption at rest, ClusterIP allocation, audit — is API-server logic. It is the **only** etcd client in the system.
+- Several subresources carry real business logic, not just a storage split: `pods/eviction` holds the **PDB check** (which is exactly why a plain `DELETE` on a pod bypasses PDBs), `serviceaccounts/token` is a JWT signing service, `pods/binding` is how the scheduler assigns a node, and `pods/status` structurally cannot mutate spec or fake a deletion.
+- The API server runs **no reconciliation loops** (bar a few bootstrap repair loops: default `kubernetes` Service endpoints, ClusterIP/NodePort drift, bootstrap RBAC). Synchronous validation/admission/persistence/notification here; asynchronous reconciliation in kube-controller-manager.
+- `TokenReview` and `SubjectAccessReview` are the generic "outsource the decision to the API server" primitives — the kubelet uses both to secure its own `:10250` port, and aggregated apiservers use SAR for fine-grained authz after delegated authentication.
