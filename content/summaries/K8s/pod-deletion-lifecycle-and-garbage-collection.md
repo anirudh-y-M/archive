@@ -79,6 +79,20 @@ Scheduler binds off a cached snapshot; kubelet recomputes for real and refuses. 
 
 **Fixes ranked:** (1) raise `max-pods` / larger nodes — removes the race, the real defect; (2) descheduler `RemoveFailedPods` with `reasons: [OutOfpods, Evicted]` + `minPodLifetimeSeconds: 3600`; (3) janitor CronJob; (4) nothing — tombstones are inert (no CPU/memory/scheduling weight). **Avoid** blanket reactive `delete --field-selector=status.phase=Failed` in prod — destroys forensics exactly when something just broke.
 
+### OOMKill is a container event, not a pod event
+
+> **A tombstone exists ⟺ kubelet wrote a terminal status *and* nobody issued a `DELETE`.** Only node-pressure eviction and admission rejection satisfy both halves.
+
+**Eviction kills the pod; OOM kills a container.** Only the former mints a tombstone.
+
+| Event | `restartPolicy` | Outcome | Tombstone? |
+|---|---|---|---|
+| OOMKilled | `Always` (Deployment/STS/DS) | container restarted **in place**; pod stays `Running`; `restartCount++` | **No** — same pod object/name/UID/node |
+| OOMKilled | `OnFailure` (Job) | restarted with backoff; *Job* may end `Failed` after `backoffLimit` | Usually no |
+| OOMKilled | `Never` | `phase=Failed`, `terminated.reason=OOMKilled` | **Yes** |
+
+`restartPolicy: Always` is mandatory for Deployments/STS/DS, so an OOMKill there produces **no `Failed` pod at all** — the evidence lives only in `containerStatuses[*]`: `restartCount`, `lastState.terminated.reason=OOMKilled`, `exitCode=137` (128 + SIGKILL). `CrashLoopBackOff` is a **container waiting reason**, not a phase — such a pod is still `phase: Running`. This is why the 261 tombstones are all `OutOfpods`/`Evicted` and **zero** are OOM: OOMs are structurally invisible to `status.phase`.
+
 ### Replacement is not removal
 
 Two independent facts that look like one event:
@@ -94,6 +108,12 @@ Two independent facts that look like one event:
 | `DELETE pods/<n>` | **No** — no PDB code path exists on this route | rolling update, RS scale-down, `kubectl delete pod`, `rollout restart`, taint manager, podgc |
 
 Official docs: *"deleting deployments or pods bypasses Pod Disruption Budgets."* Rollout safety is `strategy.rollingUpdate.maxUnavailable`; PDBs guard **voluntary disruption** only. Scheduler preemption treats PDBs as advisory. `maxUnavailable: 0` ⇒ `kubectl drain` **never completes** (documented, intended).
+
+### What the eviction API actually does
+
+An ordinary graceful delete with a PDB gate in front — hence **no tombstone**: check PDB (`429` if `disruptionsAllowed == 0`) → decrement `disruptionsAllowed` → `DELETE` honoring `terminationGracePeriodSeconds` → kubelet terminates → final grace-0 delete. Versus node-pressure eviction: grace is **truncated** (`--eviction-max-pod-grace-period`, **0** for hard thresholds) and PDBs are ignored.
+
+**Eviction never reschedules** — it only deletes; replacement is the owner's behavior (RS recreates; STS reuses name+PVC and can sit `Pending` on a zone-pinned PV; DS pods are skipped via `--ignore-daemonsets` and would return; bare pods are gone, hence `--force`). "Lands elsewhere" comes from the **cordon, not the eviction**: `drain` = `PATCH node spec.unschedulable=true`, then a `POST pods/<n>/eviction` loop retrying on `429`.
 
 ### `kubectl rollout restart` deletes nothing directly
 
@@ -249,7 +269,10 @@ Avoid `--force --grace-period=0` as a first move: it drops the API object while 
 - `--terminated-pod-gc-threshold` is a **cluster-wide high-water mark**, not a timer or a per-namespace count. It deletes only the overflow, **evicted-first then oldest**, and `<= 0` disables it entirely. It's a kube-controller-manager flag, so it's unsettable on GKE.
 - Only `gcTerminated` is threshold-bound. `gcTerminating` (out-of-service taint **+** NotReady node), `gcOrphaned` (Node object gone), and `gcUnscheduledTerminating` (no `nodeName`) run unconditionally. `gcOrphaned` is why tombstones clear when node pools shrink.
 - **Replacement ≠ removal.** The RS controller creates a replacement because `Failed` isn't active; it never deletes the Failed pod. Two independent events, different actors, different triggers.
+- **Tombstone ⟺ kubelet wrote a terminal status *and* nobody issued a `DELETE`.** Only node-pressure eviction and admission rejection qualify; everything routed through a real DELETE leaves nothing behind.
+- **OOMKill is a container event, not a pod event.** With the mandatory `restartPolicy: Always` on Deployments/STS/DS, kubelet restarts the container in the same pod object — no `Failed` phase, no tombstone. OOMs are invisible to `status.phase`; query `containerStatuses[*].lastState.terminated.reason` / `exitCode=137`, or `kube_pod_container_status_last_terminated_reason` (a gauge the next termination overwrites).
 - **PDBs apply to `pods/eviction` only.** Rolling updates, scale-downs, and `kubectl delete pod` are direct DELETEs and bypass them completely. Use `maxUnavailable` for rollout safety.
+- **The eviction API deletes, it never reschedules.** It's a graceful delete with a PDB gate — grace honored in full (node-pressure eviction truncates it, 0 for hard thresholds), no tombstone. "Lands elsewhere" is the **cordon's** doing: `drain` = cordon, then an eviction loop retrying on `429`.
 - **`kubectl rollout restart` deletes nothing.** It PATCHes the pod template; the Deployment controller only writes `.spec.replicas` on ReplicaSets; the **old RS's controller** is the actual deleter.
 - `OutOfpods` is a kubelet **admission** rejection from the bind→admit race — kubelet writes `Failed` and issues no DELETE, minting a permanent tombstone. Low `max-pods` makes it chronic. Fix the density, not the symptom.
 - **You cannot un-delete an object.** Mutating webhooks are no-ops on DELETE (`object: null`), the `deletionTimestamp` write happens below admission, and the field is immutable — with an asymmetry: faking a delete gets `422`, un-deleting gets a **silent `200 OK` no-op**.

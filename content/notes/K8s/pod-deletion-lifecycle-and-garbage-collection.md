@@ -81,6 +81,52 @@ The UID precondition in step 3 matters: without it, a slow kubelet could delete 
 
 Only three rows leave tombstones. Two of them are kubelet-side and share one mechanism: **kubelet writes `status.phase=Failed` and deletes nothing.** That is the entire source of accumulated terminal pods.
 
+That generalizes to one biconditional worth memorizing:
+
+> **A tombstone exists ⟺ kubelet wrote a terminal status *and* nobody issued a `DELETE`.**
+>
+> Only kubelet-side node-pressure eviction and admission rejection satisfy both halves. Everything routed through a real `DELETE` — workload controller, scheduler, eviction API, podgc — leaves nothing behind.
+
+---
+
+## OOMKill Is a Container Event, Not a Pod Event
+
+The distinction that derails failure audits: **eviction kills the pod; OOM kills a container.** Only the former can mint a tombstone.
+
+| Event | `restartPolicy` | Outcome | Tombstone? |
+|---|---|---|---|
+| OOMKilled | `Always` (Deployment / STS / DS) | container restarted **in place**; pod stays `Running`; `restartCount++` | **No** — same pod object, same name, same UID, same node |
+| OOMKilled | `OnFailure` (Job) | restarted in place with backoff; the *Job* may end `Failed` after `backoffLimit` | Usually no |
+| OOMKilled | `Never` | `phase=Failed`, `terminated.reason=OOMKilled` | **Yes** |
+
+Because `restartPolicy: Always` is **mandatory** for Deployments, StatefulSets and DaemonSets, an OOMKill in any of those produces **no `Failed` pod at all**. Everything you can observe lives in container status, not pod status:
+
+```
+.status.phase                                              = Running      ← unchanged
+.status.containerStatuses[*].restartCount                  = climbing
+.status.containerStatuses[*].lastState.terminated.reason    = OOMKilled
+.status.containerStatuses[*].lastState.terminated.exitCode  = 137          ← 128 + SIGKILL(9)
+.status.containerStatuses[*].state.waiting.reason           = CrashLoopBackOff
+```
+
+> **Note:** `CrashLoopBackOff` is a **container waiting reason**, not a pod phase. A pod in CrashLoopBackOff is still `phase: Running`, so no `status.phase`-based query will ever surface it. Same trap as OOMKilled.
+
+This is why the 261 tombstones in the case below are **all** `OutOfpods`/`Evicted` and **zero** are OOM. It is not that OOMs weren't happening — they are *structurally invisible* to `status.phase`.
+
+### Finding OOMs
+
+```bash
+kubectl -n <ns> get pods -o custom-columns=\
+'NAME:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,LAST:.status.containerStatuses[*].lastState.terminated.reason'
+```
+
+```promql
+kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}
+increase(kube_pod_container_status_restarts_total[1h])
+```
+
+`last_terminated_reason` is a **gauge that the next termination overwrites** — it holds only the most recent one. Alert on it live; do not try to reconstruct history from it.
+
 ---
 
 ## Why Terminal Pods Accumulate
@@ -393,6 +439,46 @@ The Kubernetes docs state it outright: *"Not all voluntary disruptions are const
 | Involuntary disruption (kernel panic, node loss, node-pressure eviction) | **Nothing.** Replicate + spread. |
 
 Corollary gotcha: `maxUnavailable: 0` / `minAvailable: 100%` in a PDB means **zero** voluntary evictions — `kubectl drain` on a node running such a pod **never completes**. That is documented, intended behavior, not a bug.
+
+### What the Eviction API Actually Does
+
+The eviction subresource is **an ordinary graceful delete with a PDB gate bolted on the front** — which is why it leaves no tombstone:
+
+```
+POST pods/<name>/eviction
+  └─ API server's eviction handler
+       1. check PDB       → 429 TooManyRequests if disruptionsAllowed == 0
+       2. decrement       PDB status.disruptionsAllowed
+       3. DELETE the pod  → sets deletionTimestamp, honors terminationGracePeriodSeconds
+  └─ kubelet: SIGTERM → grace → SIGKILL → final DELETE grace=0
+  ⇒ object gone. No Failed phase, no tombstone.
+```
+
+Contrast with **kubelet node-pressure eviction**, which writes `status.phase=Failed` and never deletes — hence a tombstone there and none here. Two further differences matter operationally:
+
+| | API-initiated eviction | Kubelet node-pressure eviction |
+|---|---|---|
+| Grace period | `terminationGracePeriodSeconds` honored **in full** | **Truncated** — capped by `--eviction-max-pod-grace-period`, and **0** for hard thresholds |
+| PDB | **Enforced** — the only pod-removal path that consults one | Ignored entirely |
+
+**Eviction never reschedules anything.** It deletes; what happens next is purely the owner's behavior:
+
+| Owner | After eviction |
+|---|---|
+| Deployment / RS | RS creates a new pod; scheduler places it **elsewhere** — because the node is cordoned |
+| StatefulSet | Recreated with the **same name and PVC** — can sit `Pending` if the PV is zone-pinned to the drained node |
+| DaemonSet | Drain skips them (`--ignore-daemonsets`); DS pods tolerate `unschedulable` and would land back on the same node |
+| Job | Job controller creates a replacement |
+| Bare pod | **Gone forever** — which is exactly why `drain` refuses without `--force` |
+
+The "lands somewhere else" property comes from the **cordon, not the eviction**. `kubectl drain` is two distinct operations:
+
+```
+1. PATCH node   spec.unschedulable = true      ← cordon
+2. loop:        POST pods/<name>/eviction      ← evict, retry on 429
+```
+
+Without step 1, the scheduler could legitimately place the replacement straight back onto the same node.
 
 ---
 
